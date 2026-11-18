@@ -8,7 +8,7 @@ export const COPY = {
     navDashboard: 'แดชบอร์ดยอดขาย',
     navNetwork: 'เครือข่าย MLM',
     navDropship: 'คำสั่งซื้อ & จัดส่ง',
-    signIn: 'เข้าสู่ระบบด้วย Google',
+    signIn: 'เข้าสู่ระบบ / สมัครสมาชิก',
     signOut: 'ออกจากระบบ',
     cart: 'ตะกร้าสินค้า',
     heroKicker: 'แพลตฟอร์มอีคอมเมิร์ซ · Payment Gateway · CJ Dropshipping',
@@ -92,9 +92,9 @@ export const COPY = {
     syncTrackingBtn: 'อัปเดตสถานะจาก CJ',
     revealPiiBtn: 'แสดงที่อยู่ผู้รับ (เฉพาะเจ้าของ/แอดมิน)',
     hidePiiBtn: 'ซ่อนข้อมูล PII',
-    signInRequiredTitle: 'เข้าสู่ระบบเพื่อใช้งานข้อมูลส่วนตัวและสั่งซื้อ',
+    signInRequiredTitle: 'เข้าสู่ระบบเพื่อใช้งานข้อมูลส่วนตัวและดูค่าคอมมิชชั่น',
     signInRequiredDesc:
-      'ระบบบังคับใช้การยืนยันตัวตนผ่าน Google ที่ยืนยันอีเมลแล้ว เพื่อให้ Firestore Security Rules ป้องกันข้อมูลส่วนบุคคลและยอดคอมมิชชั่นของคุณอย่างรัดกุม',
+      'เข้าสู่ระบบด้วยอีเมล & รหัสผ่าน (พร้อมปุ่มรีเซ็ตรหัสผ่าน) หรือบัญชี Google เพื่อตรวจสอบยอดคอมมิชชั่น ลิงก์แนะนำ และคำสั่งซื้อของคุณอย่างปลอดภัย',
   },
   en: {
     brand: 'Vela Commerce',
@@ -103,7 +103,7 @@ export const COPY = {
     navDashboard: 'Dashboard',
     navNetwork: 'MLM Network',
     navDropship: 'Orders & Dispatch',
-    signIn: 'Sign in with Google',
+    signIn: 'Sign In / Register',
     signOut: 'Sign Out',
     cart: 'Bag',
     heroKicker: 'Integrated E-Commerce · HMAC Payment Gateway · CJ Dropshipping',
@@ -187,8 +187,8 @@ export const COPY = {
     syncTrackingBtn: 'Sync CJ Tracking',
     revealPiiBtn: 'Reveal Recipient PII',
     hidePiiBtn: 'Hide PII',
-    signInRequiredTitle: 'Sign In to Access Member Data & Checkout',
+    signInRequiredTitle: 'Sign In to Access Member Data & Commissions',
     signInRequiredDesc:
-      'Verified Google Authentication is enforced by Firestore Security Rules to isolate your private shipping details, payment signatures, and commission ledger.',
+      'Sign in with your Email & Password (with Password Reset support) or Google Account to view commissions, referral links, and order status securely.',
   },
 } as const;

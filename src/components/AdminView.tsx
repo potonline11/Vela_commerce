@@ -7,6 +7,7 @@ import {
   Gavel,
   LayoutDashboard,
   Link2,
+  Mail,
   PackageCheck,
   RefreshCw,
   Search,
@@ -31,6 +32,7 @@ import type {
   AuctionRecord,
   CjStatusResponse,
   CommissionRecord,
+  EmailStatusResponse,
   MemberListingRecord,
   MemberProfile,
   OrderRecord,
@@ -97,6 +99,10 @@ export function AdminView({
     message: string;
   } | null>(null);
   const [testingGateway, setTestingGateway] = useState(false);
+  const [emailStatus, setEmailStatus] = useState<EmailStatusResponse | null>(null);
+  const [testEmailTo, setTestEmailTo] = useState(user.email || '');
+  const [testingEmail, setTestingEmail] = useState(false);
+  const [emailTestMsg, setEmailTestMsg] = useState('');
 
   const runGatewayTest = async () => {
     setTestingGateway(true);
@@ -124,10 +130,39 @@ export function AdminView({
     }
   };
 
+  const runEmailTest = async () => {
+    if (!testEmailTo.trim()) return;
+    setTestingEmail(true);
+    setEmailTestMsg('');
+    try {
+      const res = await fetch('/api/emails/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ toEmail: testEmailTo.trim() }),
+      });
+      const data = await res.json();
+      setEmailTestMsg(
+        data.sent
+          ? lang === 'th'
+            ? `ส่งอีเมลทดสอบไปยัง ${testEmailTo.trim()} สำเร็จ (${data.provider})`
+            : `Test email sent to ${testEmailTo.trim()} via ${data.provider}.`
+          : data.message || 'Email provider not configured'
+      );
+    } catch (err) {
+      setEmailTestMsg(err instanceof Error ? err.message : 'Email test failed');
+    } finally {
+      setTestingEmail(false);
+    }
+  };
+
   useEffect(() => {
     fetch('/api/cj/status')
       .then((r) => r.json())
       .then((data) => setCjStatus(data as CjStatusResponse))
+      .catch(() => {});
+    fetch('/api/emails/status')
+      .then((r) => r.json())
+      .then((data) => setEmailStatus(data as EmailStatusResponse))
       .catch(() => {});
   }, []);
 
@@ -934,6 +969,55 @@ export function AdminView({
                     ? 'ทดสอบ Secret Key'
                     : 'Test Gateway Auth'}
                 </button>
+              </div>
+
+              {/* Email Automation Diagnostic Card */}
+              <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-3">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2">
+                      <Mail className="w-4 h-4 text-slate-700" />
+                      <h2 className="text-base font-semibold text-slate-900">
+                        {lang === 'th'
+                          ? 'ระบบส่งอีเมลยืนยัน · ลิงก์แนะนำ & รหัสผ่านอัตโนมัติ'
+                          : 'Automated Confirmation & Credentials Email'}
+                      </h2>
+                    </div>
+                    <p className="text-xs text-slate-600">
+                      {emailStatus?.configured
+                        ? lang === 'th'
+                          ? `เชื่อมต่อผ่าน ${emailStatus.provider.toUpperCase()} (${emailStatus.senderMasked}) พร้อมส่งอีเมลอัตโนมัติหลังชำระเงิน`
+                          : `Active via ${emailStatus.provider.toUpperCase()} (${emailStatus.senderMasked}).`
+                        : lang === 'th'
+                        ? 'ตั้งค่า RESEND_API_KEY หรือ SMTP_USER + SMTP_PASS (เช่น Gmail App Password) ใน Environment Variables เพื่อส่งอีเมลเข้า Inbox ลูกค้าอัตโนมัติ'
+                        : 'Set RESEND_API_KEY or SMTP_USER + SMTP_PASS in server Environment Variables to send automatic emails.'}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <input
+                      type="email"
+                      value={testEmailTo}
+                      onChange={(e) => setTestEmailTo(e.target.value)}
+                      placeholder="test@email.com"
+                      className="px-3 py-1.5 text-xs border border-slate-200 rounded-lg w-44"
+                    />
+                    <button
+                      type="button"
+                      disabled={testingEmail || !testEmailTo.trim()}
+                      onClick={runEmailTest}
+                      className="px-3.5 py-1.5 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 disabled:opacity-50 whitespace-nowrap"
+                    >
+                      {testingEmail
+                        ? lang === 'th'
+                          ? 'กำลังส่ง...'
+                          : 'Sending...'
+                        : lang === 'th'
+                        ? 'ทดสอบส่งอีเมล'
+                        : 'Send Test Email'}
+                    </button>
+                  </div>
+                </div>
+                {emailTestMsg && <p className="text-xs text-slate-700">{emailTestMsg}</p>}
               </div>
 
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">

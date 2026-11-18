@@ -219,3 +219,24 @@ export interface CjStatusResponse {
   warehouses: string[];
   catalogCount: number;
 }
+
+export interface EmailStatusResponse {
+  configured: boolean;
+  provider: 'resend' | 'smtp' | 'none';
+  senderMasked: string;
+}
+
+export interface EmailConfirmationResult {
+  sent: boolean;
+  provider: 'resend' | 'smtp' | 'none';
+  toEmail: string;
+  username: string;
+  temporaryPassword?: string | null;
+  referralCode: string;
+  referralLink: string;
+  loginUrl: string;
+  resetPasswordUrl: string;
+  mailtoDraftUrl?: string;
+  message?: string;
+}
+

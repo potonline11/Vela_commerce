@@ -1,6 +1,7 @@
 import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
 import crypto from 'node:crypto';
+import nodemailer from 'nodemailer';
 
 export interface CjProductRecord {
   sku: string;
@@ -74,6 +75,8 @@ function sanitizeShortText(input: unknown, maxLen: number): string {
   return input.replace(/[<>]/g, '').trim().slice(0, maxLen);
 }
 
+const cleanEnvCjKey = (process.env.CJ_API_KEY || '').trim().replace(/^['"]|['"]$/g, '').trim();
+
 let cjSessionState: {
   connected: boolean;
   mode: 'live_api' | 'catalog_sync';
@@ -82,14 +85,14 @@ let cjSessionState: {
   accessToken: string | null;
   lastSyncedAt: string;
 } = {
-  connected: Boolean(process.env.CJ_API_KEY),
-  mode: process.env.CJ_API_KEY ? 'live_api' : 'catalog_sync',
+  connected: Boolean(cleanEnvCjKey),
+  mode: cleanEnvCjKey ? 'live_api' : 'catalog_sync',
   maskedEmail: process.env.CJ_API_EMAIL
     ? maskEmail(process.env.CJ_API_EMAIL)
-    : process.env.CJ_API_KEY
-    ? `CJ-${process.env.CJ_API_KEY.split('@')[0]?.slice(0, 6) || 'API'}***`
+    : cleanEnvCjKey
+    ? `CJ-${cleanEnvCjKey.split('@')[0]?.slice(0, 6) || 'API'}***`
     : 'sync@velacommerce.co',
-  apiKey: process.env.CJ_API_KEY?.trim() || null,
+  apiKey: cleanEnvCjKey || null,
   accessToken: null,
   lastSyncedAt: new Date().toISOString(),
 };
@@ -665,62 +668,245 @@ export function createApiApp() {
     }
   });
 
+  let cachedUsdToThb: { rate: number; expiresAt: number } = { rate: 34.5, expiresAt: 0 };
+
+  async function getUsdToThbRate(): Promise<number> {
+    if (Date.now() < cachedUsdToThb.expiresAt) {
+      return cachedUsdToThb.rate;
+    }
+    try {
+      const fxRes = await fetch('https://open.er-api.com/v6/latest/USD');
+      if (fxRes.ok) {
+        const fxData = (await fxRes.json()) as { rates?: { THB?: number } };
+        const thb = Number(fxData?.rates?.THB);
+        if (Number.isFinite(thb) && thb > 20 && thb < 60) {
+          cachedUsdToThb = { rate: Number(thb.toFixed(2)), expiresAt: Date.now() + 60 * 60 * 1000 };
+          return cachedUsdToThb.rate;
+        }
+      }
+    } catch {
+      // Keep fallback rate
+    }
+    return cachedUsdToThb.rate;
+  }
+
+  function parseCjUsdPrice(raw: unknown): number {
+    if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) {
+      return raw;
+    }
+    if (typeof raw === 'string') {
+      const match = raw.match(/\d+(?:\.\d+)?/);
+      if (match) {
+        const parsed = Number(match[0]);
+        if (Number.isFinite(parsed) && parsed > 0) return parsed;
+      }
+    }
+    return 10;
+  }
+
+  function normalizeCjImageUrl(raw: unknown): string {
+    if (typeof raw !== 'string') return '';
+    let trimmed = raw.trim();
+    if (!trimmed) return '';
+    if (trimmed.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(trimmed) as unknown;
+        if (Array.isArray(parsed) && typeof parsed[0] === 'string') {
+          trimmed = parsed[0].trim();
+        }
+      } catch {
+        // Ignore malformed JSON array
+      }
+    }
+    if (trimmed.includes(',') && !trimmed.includes('?')) {
+      trimmed = trimmed.split(',')[0].trim();
+    }
+    if (trimmed.startsWith('//')) return `https:${trimmed}`;
+    if (trimmed.startsWith('http://')) return `https://${trimmed.slice(7)}`;
+    if (trimmed.startsWith('https://')) return trimmed;
+    return '';
+  }
+
   app.get('/api/cj/products', async (req: Request, res: Response) => {
-    const q = sanitizeShortText(req.query?.q, 80).toLowerCase();
-    const category = sanitizeShortText(req.query?.category, 40);
+    const q = sanitizeShortText(req.query?.q, 80);
+    const qLower = q.toLowerCase();
+    const category = sanitizeShortText(req.query?.category, 60);
+    const usdToThbRate = await getUsdToThbRate();
 
     if (cjSessionState.mode === 'live_api') {
       try {
-        const token = await ensureCjAccessToken();
+        let token = await ensureCjAccessToken();
         if (token) {
-          const cjRes = await fetch(
-            `https://developers.cjdropshipping.com/api2.0/v1/product/list?pageNum=1&pageSize=12${
-              q ? `&productNameEn=${encodeURIComponent(q)}` : ''
-            }`,
-            {
-              headers: { 'CJ-Access-Token': token },
+          interface RawCjItem {
+            pid?: string;
+            id?: string;
+            productSku?: string;
+            sku?: string;
+            productNameEn?: string;
+            nameEn?: string;
+            productName?: string;
+            productImage?: string;
+            bigImage?: string;
+            productImageSet?: string[];
+            sellPrice?: unknown;
+            nowPrice?: unknown;
+            discountPrice?: unknown;
+            categoryName?: string;
+            threeCategoryName?: string;
+            twoCategoryName?: string;
+            oneCategoryName?: string;
+            productWeight?: unknown;
+            warehouseInventoryNum?: unknown;
+            listedNum?: unknown;
+          }
+
+          let rawItems: RawCjItem[] = [];
+
+          const fetchCjV2 = async (keyword: string): Promise<RawCjItem[]> => {
+            if (!token) return [];
+            const v2Url = `https://developers.cjdropshipping.com/api2.0/v1/product/listV2?page=1&size=24${
+              keyword ? `&keyWord=${encodeURIComponent(keyword)}` : ''
+            }`;
+            let v2Res = await fetch(v2Url, { headers: { 'CJ-Access-Token': token } });
+            if (v2Res.status === 401) {
+              cjSessionState.accessToken = null;
+              token = await ensureCjAccessToken();
+              if (token) {
+                v2Res = await fetch(v2Url, { headers: { 'CJ-Access-Token': token } });
+              }
             }
-          );
-          if (cjRes.ok) {
-            const cjData = (await cjRes.json()) as {
+            if (!v2Res.ok) return [];
+            const v2Data = (await v2Res.json()) as {
               result?: boolean;
               data?: {
-                list?: Array<{
-                  pid: string;
-                  productSku: string;
-                  productNameEn: string;
-                  sellPrice: number;
-                  categoryName: string;
-                  productWeight: number;
-                }>;
+                content?: Array<{ productList?: RawCjItem[] }>;
+                list?: RawCjItem[];
               };
             };
-            if (cjData?.result && Array.isArray(cjData.data?.list) && cjData.data.list.length > 0) {
-              const liveMapped: CjProductRecord[] = cjData.data.list.slice(0, 6).map((item, idx) => {
-                const fallbackImg = CURATED_CJ_CATALOG[idx % CURATED_CJ_CATALOG.length].imageUrl;
-                const wholesaleThb = Math.max(450, Math.round((Number(item.sellPrice) || 18) * 35));
-                return {
-                  sku: item.productSku || `CJ-LIVE-${idx + 1}`,
-                  cjProductId: item.pid,
-                  title: item.productNameEn,
-                  titleTh: item.productNameEn,
-                  category: item.categoryName || 'CJ Live Sync',
-                  description:
-                    'Synchronized directly from CJ Dropshipping Open API 2.0 live warehouse inventory.',
-                  descriptionTh: 'ซิงค์ข้อมูลสินค้าแบบเรียลไทม์จากคลังสินค้า CJ Dropshipping API 2.0',
-                  imageUrl: fallbackImg,
-                  wholesaleCost: wholesaleThb,
-                  retailPrice: Math.round(wholesaleThb * 1.65),
-                  commissionPoolRate: 0.225,
-                  stock: 120,
-                  warehouse: 'CJ-GLOBAL',
-                  weightGrams: Number(item.productWeight) || 500,
-                  active: true,
-                };
-              });
-              res.json({ source: 'live_api', products: liveMapped });
-              return;
+            const contentItems = Array.isArray(v2Data?.data?.content)
+              ? v2Data.data.content.flatMap((bucket) =>
+                  Array.isArray(bucket?.productList) ? bucket.productList : []
+                )
+              : [];
+            const v2List =
+              contentItems.length > 0
+                ? contentItems
+                : Array.isArray(v2Data?.data?.list)
+                ? v2Data.data.list
+                : [];
+            return v2Data?.result && v2List.length > 0 ? v2List : [];
+          };
+
+          const fetchCjV1 = async (keyword: string): Promise<RawCjItem[]> => {
+            if (!token) return [];
+            const v1Url = `https://developers.cjdropshipping.com/api2.0/v1/product/list?pageNum=1&pageSize=24${
+              keyword ? `&productNameEn=${encodeURIComponent(keyword)}` : ''
+            }`;
+            let cjRes = await fetch(v1Url, {
+              headers: { 'CJ-Access-Token': token },
+            });
+            if (cjRes.status === 401) {
+              cjSessionState.accessToken = null;
+              token = await ensureCjAccessToken();
+              if (token) {
+                cjRes = await fetch(v1Url, { headers: { 'CJ-Access-Token': token } });
+              }
             }
+            if (!cjRes.ok) return [];
+            const cjData = (await cjRes.json()) as {
+              result?: boolean;
+              data?: { list?: RawCjItem[] };
+            };
+            return cjData?.result && Array.isArray(cjData.data?.list) && cjData.data.list.length > 0
+              ? cjData.data.list
+              : [];
+          };
+
+          try {
+            if (q) {
+              rawItems = await fetchCjV2(q);
+              if (rawItems.length === 0) {
+                rawItems = await fetchCjV1(q);
+              }
+            } else {
+              rawItems = await fetchCjV1('');
+              if (rawItems.length === 0) {
+                rawItems = await fetchCjV2('');
+              }
+              const adultFilterRe =
+                /\b(vibrator|dildo|nipple|lingerie|thong|bondage|erotic|sexy|porn|masturbat|fetish)\b/i;
+              const safeItems = rawItems.filter((item) => {
+                const label = `${item.nameEn || item.productNameEn || item.productName || ''} ${
+                  item.categoryName || ''
+                }`;
+                return !adultFilterRe.test(label);
+              });
+              if (safeItems.length > 0) {
+                rawItems = safeItems;
+              }
+            }
+          } catch {
+            // Fall through to curated catalog if both endpoints fail
+          }
+
+          if (rawItems.length > 0) {
+            const liveMapped: CjProductRecord[] = rawItems.slice(0, 24).map((item, idx) => {
+              const firstImg =
+                normalizeCjImageUrl(item.bigImage) ||
+                normalizeCjImageUrl(item.productImage) ||
+                (Array.isArray(item.productImageSet)
+                  ? normalizeCjImageUrl(item.productImageSet[0])
+                  : '');
+              const usdPrice = parseCjUsdPrice(
+                item.nowPrice ?? item.discountPrice ?? item.sellPrice
+              );
+              const wholesaleThb = Math.max(10, Math.round(usdPrice * usdToThbRate));
+              const retailThb = Math.max(10, Math.round(wholesaleThb * 1.3));
+              const title =
+                sanitizeShortText(item.nameEn || item.productNameEn || item.productName, 140) ||
+                `CJ Product #${idx + 1}`;
+              const cat =
+                sanitizeShortText(
+                  item.threeCategoryName ||
+                    item.twoCategoryName ||
+                    item.oneCategoryName ||
+                    item.categoryName,
+                  60
+                ) || 'CJ Dropshipping';
+              const inv = Number(item.warehouseInventoryNum ?? item.listedNum);
+              const stock = Number.isFinite(inv) && inv > 0 ? Math.round(inv) : 120;
+
+              return {
+                sku: sanitizeShortText(item.sku || item.productSku, 64) || `CJ-LIVE-${idx + 1}`,
+                cjProductId: String(item.pid || item.id || `CJ-${idx + 1}`),
+                title,
+                titleTh: title,
+                category: cat,
+                description: `Live CJ Dropshipping ($${usdPrice.toFixed(2)} USD · 1 USD = ฿${usdToThbRate.toFixed(2)}) with +30% retail pricing.`,
+                descriptionTh: `สินค้าจริงจาก CJ Dropshipping ($${usdPrice.toFixed(2)} USD ≈ ฿${wholesaleThb.toLocaleString('th-TH')}) บวกกำไร +30%`,
+                imageUrl: firstImg,
+                wholesaleCost: wholesaleThb,
+                retailPrice: retailThb,
+                commissionPoolRate: 0.225,
+                stock,
+                warehouse: 'CJ-GLOBAL',
+                weightGrams: Number(item.productWeight) || 500,
+                active: true,
+              };
+            });
+
+            const filteredLive =
+              category && category !== 'All'
+                ? liveMapped.filter((p) => p.category === category)
+                : liveMapped;
+
+            res.json({
+              source: 'live_api',
+              usdToThbRate,
+              markupPercent: 30,
+              products: filteredLive,
+            });
+            return;
           }
         }
       } catch {
@@ -730,15 +916,23 @@ export function createApiApp() {
 
     const filtered = CURATED_CJ_CATALOG.filter((item) => {
       const matchesQuery =
-        !q ||
-        item.title.toLowerCase().includes(q) ||
-        item.titleTh.toLowerCase().includes(q) ||
-        item.sku.toLowerCase().includes(q);
+        !qLower ||
+        item.title.toLowerCase().includes(qLower) ||
+        item.titleTh.toLowerCase().includes(qLower) ||
+        item.sku.toLowerCase().includes(qLower);
       const matchesCat = !category || category === 'All' || item.category === category;
       return matchesQuery && matchesCat;
-    });
+    }).map((item) => ({
+      ...item,
+      retailPrice: Math.round(item.wholesaleCost * 1.3),
+    }));
 
-    res.json({ source: cjSessionState.mode, products: filtered });
+    res.json({
+      source: cjSessionState.mode,
+      usdToThbRate,
+      markupPercent: 30,
+      products: filtered,
+    });
   });
 
   app.post('/api/cj/orders/create', async (req: Request, res: Response) => {
@@ -855,6 +1049,259 @@ export function createApiApp() {
       fulfillmentStatus: latestStatus,
       events: shipment.events,
     });
+  });
+
+  // --- Automated Order Confirmation, Referral Link & Credentials Email API ---
+
+  function getEmailProviderConfig() {
+    const resendKey = (process.env.RESEND_API_KEY || '').trim().replace(/^['"]|['"]$/g, '');
+    const smtpUser = (process.env.SMTP_USER || '').trim().replace(/^['"]|['"]$/g, '');
+    const smtpPass = (process.env.SMTP_PASS || '')
+      .trim()
+      .replace(/^['"]|['"]$/g, '')
+      .replace(/\s+/g, '');
+    const smtpHost = (process.env.SMTP_HOST || 'smtp.gmail.com').trim();
+    const smtpPort = Number(process.env.SMTP_PORT || 465);
+    const fromEmail =
+      (process.env.EMAIL_FROM || '').trim() ||
+      (smtpUser ? `Vela Commerce <${smtpUser}>` : 'Vela Commerce <onboarding@resend.dev>');
+
+    if (resendKey) {
+      return { configured: true, provider: 'resend' as const, resendKey, fromEmail };
+    }
+    if (smtpUser && smtpPass) {
+      return {
+        configured: true,
+        provider: 'smtp' as const,
+        smtpHost,
+        smtpPort,
+        smtpUser,
+        smtpPass,
+        fromEmail,
+      };
+    }
+    return { configured: false, provider: 'none' as const, fromEmail };
+  }
+
+  function escapeHtmlText(value: string): string {
+    return value
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  async function dispatchTransactionalEmail(params: {
+    toEmail: string;
+    subject: string;
+    html: string;
+    text: string;
+  }): Promise<{ sent: boolean; provider: 'resend' | 'smtp' | 'none'; message: string }> {
+    const cfg = getEmailProviderConfig();
+    if (!cfg.configured) {
+      return {
+        sent: false,
+        provider: 'none',
+        message:
+          'Server email provider is not configured yet (set RESEND_API_KEY or SMTP_USER + SMTP_PASS).',
+      };
+    }
+
+    if (cfg.provider === 'resend') {
+      const resendRes = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${cfg.resendKey}`,
+        },
+        body: JSON.stringify({
+          from: cfg.fromEmail,
+          to: [params.toEmail],
+          subject: params.subject,
+          html: params.html,
+          text: params.text,
+        }),
+      });
+      if (!resendRes.ok) {
+        const errBody = (await resendRes.json().catch(() => ({}))) as { message?: string };
+        return {
+          sent: false,
+          provider: 'resend',
+          message: errBody?.message || `Resend returned HTTP ${resendRes.status}`,
+        };
+      }
+      return { sent: true, provider: 'resend', message: 'Email sent via Resend API.' };
+    }
+
+    try {
+      const transporter = nodemailer.createTransport({
+        host: cfg.smtpHost,
+        port: cfg.smtpPort,
+        secure: cfg.smtpPort === 465,
+        auth: {
+          user: cfg.smtpUser,
+          pass: cfg.smtpPass,
+        },
+      });
+      await transporter.sendMail({
+        from: cfg.fromEmail,
+        to: params.toEmail,
+        subject: params.subject,
+        html: params.html,
+        text: params.text,
+      });
+      return { sent: true, provider: 'smtp', message: 'Email sent via SMTP.' };
+    } catch (err) {
+      return {
+        sent: false,
+        provider: 'smtp',
+        message: err instanceof Error ? err.message : 'SMTP delivery failed',
+      };
+    }
+  }
+
+  app.get('/api/emails/status', (_req: Request, res: Response) => {
+    const cfg = getEmailProviderConfig();
+    const senderMasked =
+      cfg.provider === 'smtp'
+        ? maskEmail(cfg.smtpUser)
+        : cfg.provider === 'resend'
+        ? cfg.fromEmail
+        : 'Not Configured';
+    res.json({
+      configured: cfg.configured,
+      provider: cfg.provider,
+      senderMasked,
+    });
+  });
+
+  app.post('/api/emails/order-confirmation', async (req: Request, res: Response) => {
+    const toEmail = sanitizeShortText(req.body?.toEmail, 160);
+    const customerName = sanitizeShortText(req.body?.customerName, 100) || 'สมาชิก Vela Commerce';
+    const orderNumber = sanitizeShortText(req.body?.orderNumber, 48) || `ORD-${Date.now()}`;
+    const itemSummary = sanitizeShortText(req.body?.itemSummary, 240) || 'สินค้า Vela Commerce';
+    const totalAmount = Number(req.body?.totalAmount) || 0;
+    const intentId = sanitizeShortText(req.body?.intentId, 128) || '';
+    const referralCode = sanitizeShortText(req.body?.referralCode, 32) || 'VELA-MEMBER';
+    const originUrl = sanitizeShortText(req.body?.originUrl, 200) || 'https://velacommerce.vercel.app';
+    const temporaryPassword =
+      typeof req.body?.temporaryPassword === 'string'
+        ? req.body.temporaryPassword.trim().slice(0, 80)
+        : '';
+
+    if (!toEmail || !toEmail.includes('@')) {
+      res.status(400).json({ error: 'Valid toEmail is required' });
+      return;
+    }
+
+    const cleanOrigin = originUrl.replace(/\/+$/, '');
+    const referralLink = `${cleanOrigin}/?ref=${encodeURIComponent(referralCode)}`;
+    const loginUrl = `${cleanOrigin}/?auth=login`;
+    const resetPasswordUrl = `${cleanOrigin}/?auth=reset`;
+
+    const subject = `[Vela Commerce] ยืนยันการชำระเงิน ${orderNumber} · ข้อมูลเข้าสู่ระบบสมาชิก & ลิงก์แนะนำ`;
+
+    const passwordHtmlRow = temporaryPassword
+      ? `<tr>
+           <td style="padding:8px 0;color:#475569;font-size:13px;">รหัสผ่านชั่วคราว (Password)</td>
+           <td style="padding:8px 0;color:#0f172a;font-size:14px;font-weight:700;font-family:monospace;">${escapeHtmlText(temporaryPassword)}</td>
+         </tr>`
+      : `<tr>
+           <td style="padding:8px 0;color:#475569;font-size:13px;">รหัสผ่าน (Password)</td>
+           <td style="padding:8px 0;color:#0f172a;font-size:13px;">ใช้รหัสผ่านที่คุณตั้งไว้ (หรือกดตั้งรหัสใหม่จากลิงก์รีเซ็ตด้านล่าง)</td>
+         </tr>`;
+
+    const html = `
+      <div style="font-family:'Helvetica Neue',Arial,sans-serif;max-width:600px;margin:0 auto;padding:24px;background:#f8fafc;color:#0f172a;">
+        <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:12px;padding:28px;">
+          <h1 style="margin:0 0 8px 0;font-size:20px;color:#0f172a;">Vela Commerce · ยืนยันการชำระเงินสำเร็จ</h1>
+          <p style="margin:0 0 20px 0;font-size:14px;color:#475569;">สวัสดีคุณ ${escapeHtmlText(customerName)}, ระบบได้รับยอดชำระสำหรับคำสั่งซื้อ <strong>${escapeHtmlText(orderNumber)}</strong> เรียบร้อยแล้ว</p>
+
+          <div style="background:#ecfdf5;border:1px solid #a7f3d0;border-radius:8px;padding:16px;margin-bottom:20px;">
+            <p style="margin:0 0 6px 0;font-size:13px;color:#065f46;font-weight:600;">สรุปคำสั่งซื้อ</p>
+            <p style="margin:0;font-size:13px;color:#0f172a;">รายการ: ${escapeHtmlText(itemSummary)}</p>
+            <p style="margin:4px 0 0 0;font-size:13px;color:#0f172a;">ยอดชำระ: <strong>฿${totalAmount.toLocaleString('th-TH')}</strong> ${intentId ? `· Ref: ${escapeHtmlText(intentId)}` : ''}</p>
+          </div>
+
+          <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin-bottom:20px;">
+            <p style="margin:0 0 10px 0;font-size:14px;color:#0f172a;font-weight:700;">ข้อมูลเข้าสู่ระบบสมาชิก (ดูค่าคอมมิชชั่น & รายละเอียด)</p>
+            <table style="width:100%;border-collapse:collapse;">
+              <tr>
+                <td style="padding:8px 0;color:#475569;font-size:13px;">ชื่อผู้ใช้ (Username)</td>
+                <td style="padding:8px 0;color:#0f172a;font-size:14px;font-weight:700;font-family:monospace;">${escapeHtmlText(toEmail)}</td>
+              </tr>
+              ${passwordHtmlRow}
+              <tr>
+                <td style="padding:8px 0;color:#475569;font-size:13px;">รหัสแนะนำของคุณ</td>
+                <td style="padding:8px 0;color:#047857;font-size:14px;font-weight:700;font-family:monospace;">${escapeHtmlText(referralCode)}</td>
+              </tr>
+            </table>
+            <p style="margin:12px 0 6px 0;font-size:13px;color:#475569;">ลิงก์แนะนำสมาชิกส่วนตัว (แชร์เพื่อรับคอมมิชชั่น 4 ชั้น 12% / 6% / 3% / 1.5%):</p>
+            <p style="margin:0 0 14px 0;font-size:13px;word-break:break-all;"><a href="${escapeHtmlText(referralLink)}" style="color:#047857;font-weight:600;">${escapeHtmlText(referralLink)}</a></p>
+            <div style="margin-top:12px;">
+              <a href="${escapeHtmlText(loginUrl)}" style="display:inline-block;padding:10px 18px;background:#0f172a;color:#ffffff;text-decoration:none;border-radius:8px;font-size:13px;font-weight:600;margin-right:8px;">เข้าสู่ระบบดูค่าคอมมิชชั่น</a>
+              <a href="${escapeHtmlText(resetPasswordUrl)}" style="display:inline-block;padding:10px 16px;background:#ffffff;color:#0f172a;border:1px solid #cbd5e1;text-decoration:none;border-radius:8px;font-size:13px;font-weight:600;">รีเซ็ตรหัสผ่าน (Reset Password)</a>
+            </div>
+          </div>
+
+          <p style="margin:0;font-size:12px;color:#64748b;">แนะนำให้เปลี่ยนรหัสผ่านหลังจากเข้าสู่ระบบครั้งแรกเพื่อความปลอดภัยสูงสุด</p>
+        </div>
+      </div>
+    `;
+
+    const text = [
+      `Vela Commerce - ยืนยันการชำระเงิน ${orderNumber}`,
+      `รายการ: ${itemSummary}`,
+      `ยอดชำระ: ฿${totalAmount.toLocaleString('th-TH')}`,
+      `Username: ${toEmail}`,
+      temporaryPassword
+        ? `Password: ${temporaryPassword}`
+        : `Password: ใช้รหัสผ่านเดิมของคุณ หรือรีเซ็ตได้ที่ ${resetPasswordUrl}`,
+      `รหัสแนะนำ (Referral Code): ${referralCode}`,
+      `ลิงก์แนะนำสมาชิก: ${referralLink}`,
+      `เข้าสู่ระบบดูค่าคอมมิชชั่น: ${loginUrl}`,
+      `รีเซ็ตรหัสผ่าน: ${resetPasswordUrl}`,
+    ].join('\n');
+
+    const delivery = await dispatchTransactionalEmail({
+      toEmail,
+      subject,
+      html,
+      text,
+    });
+
+    const mailtoDraftUrl = `mailto:${encodeURIComponent(toEmail)}?subject=${encodeURIComponent(
+      subject
+    )}&body=${encodeURIComponent(text)}`;
+
+    res.json({
+      sent: delivery.sent,
+      provider: delivery.provider,
+      toEmail,
+      username: toEmail,
+      temporaryPassword: temporaryPassword || null,
+      referralCode,
+      referralLink,
+      loginUrl,
+      resetPasswordUrl,
+      mailtoDraftUrl,
+      message: delivery.message,
+    });
+  });
+
+  app.post('/api/emails/test', async (req: Request, res: Response) => {
+    const toEmail = sanitizeShortText(req.body?.toEmail, 160);
+    if (!toEmail || !toEmail.includes('@')) {
+      res.status(400).json({ error: 'Valid recipient email is required' });
+      return;
+    }
+    const delivery = await dispatchTransactionalEmail({
+      toEmail,
+      subject: '[Vela Commerce] ทดสอบระบบส่งอีเมลอัตโนมัติสำเร็จ',
+      html: `<p>ระบบส่งอีเมลยืนยันคำสั่งซื้อและข้อมูลสมาชิกของ <strong>Vela Commerce</strong> พร้อมใช้งานแล้ว</p>`,
+      text: 'ระบบส่งอีเมลยืนยันคำสั่งซื้อและข้อมูลสมาชิกของ Vela Commerce พร้อมใช้งานแล้ว',
+    });
+    res.status(delivery.sent ? 200 : 200).json(delivery);
   });
 
   return app;

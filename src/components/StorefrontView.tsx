@@ -8,13 +8,17 @@ interface StorefrontViewProps {
   lang: Lang;
   products: ProductItem[];
   loadingProducts: boolean;
+  cjSource?: string;
+  usdToThbRate?: number;
+  onSearchCatalog?: (query?: string) => void;
   onAddToCart: (product: ProductItem) => void;
   onNavigateDashboard: () => void;
   onOpenMediaKit: () => void;
 }
 
 function ProductImage({ src, alt }: { src: string; alt: string }) {
-  const [failed, setFailed] = useState(false);
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  const failed = failedSrc === src;
 
   if (failed || !src) {
     return (
@@ -30,7 +34,7 @@ function ProductImage({ src, alt }: { src: string; alt: string }) {
       src={src}
       alt={alt}
       referrerPolicy="no-referrer"
-      onError={() => setFailed(true)}
+      onError={() => setFailedSrc(src)}
       className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-[1.03]"
     />
   );
@@ -40,22 +44,45 @@ export function StorefrontView({
   lang,
   products,
   loadingProducts,
+  cjSource = 'catalog_sync',
+  usdToThbRate = 34.5,
+  onSearchCatalog,
   onAddToCart,
   onNavigateDashboard,
   onOpenMediaKit,
 }: StorefrontViewProps) {
   const t = COPY[lang];
   const [search, setSearch] = useState('');
+  const [activeRemoteQuery, setActiveRemoteQuery] = useState('');
   const [category, setCategory] = useState('All');
   const [heroError, setHeroError] = useState(false);
+
+  const handleRemoteSearchSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmed = search.trim();
+    setCategory('All');
+    setActiveRemoteQuery(trimmed);
+    onSearchCatalog?.(trimmed);
+  };
+
+  const handleResetFilters = () => {
+    setSearch('');
+    setCategory('All');
+    if (activeRemoteQuery) {
+      setActiveRemoteQuery('');
+      onSearchCatalog?.('');
+    }
+  };
 
   const categories = ['All', ...Array.from(new Set(products.map((p) => p.category)))];
 
   const filtered = products.filter((p) => {
     const matchesCat = category === 'All' || p.category === category;
     const q = search.trim().toLowerCase();
+    const isRemoteMatch = activeRemoteQuery.trim().toLowerCase() === q && q.length > 0;
     const matchesQ =
       !q ||
+      isRemoteMatch ||
       p.title.toLowerCase().includes(q) ||
       p.titleTh.toLowerCase().includes(q) ||
       p.sku.toLowerCase().includes(q);
@@ -145,19 +172,49 @@ export function StorefrontView({
               {t.catalogTitle}
             </h2>
             <p className="text-sm text-slate-600 mt-1.5 max-w-2xl">{t.catalogSubtitle}</p>
+            <div className="mt-2.5 flex flex-wrap items-center gap-3 text-xs">
+              <span
+                className={`font-medium ${
+                  cjSource === 'live_api' ? 'text-emerald-700' : 'text-amber-700'
+                }`}
+              >
+                {cjSource === 'live_api'
+                  ? lang === 'th'
+                    ? 'ซิงค์คลังสินค้าจริง CJ Dropshipping API 2.0'
+                    : 'Live CJ Dropshipping API 2.0 Connected'
+                  : lang === 'th'
+                  ? 'โหมด Catalog Sync (ใส่ CJ_API_KEY ในระบบแอดมิน/Vercel เพื่อดึงสินค้าจริง)'
+                  : 'Catalog Sync Mode (Connect CJ_API_KEY in Admin / Vercel for live items)'}
+              </span>
+              <span className="text-slate-300" aria-hidden="true">
+                |
+              </span>
+              <span className="font-mono text-slate-600 tabular-nums">
+                1 USD = ฿{usdToThbRate.toFixed(2)} · Markup +30%
+              </span>
+            </div>
           </div>
 
           <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
-            <div className="relative">
-              <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-              <input
-                type="text"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder={t.searchPlaceholder}
-                className="w-full sm:w-64 pl-9 pr-3 py-2 text-sm bg-white border border-slate-200 rounded-lg text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-900"
-              />
-            </div>
+            <form onSubmit={handleRemoteSearchSubmit} className="flex items-center gap-2">
+              <div className="relative flex-1">
+                <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  type="text"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder={t.searchPlaceholder}
+                  className="w-full sm:w-64 pl-9 pr-3 py-2 text-sm bg-white border border-slate-200 rounded-lg text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-900"
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={loadingProducts}
+                className="px-3.5 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 disabled:opacity-50 transition-colors whitespace-nowrap shrink-0"
+              >
+                {lang === 'th' ? 'ค้นหาจาก CJ' : 'Search CJ'}
+              </button>
+            </form>
 
             <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg overflow-x-auto">
               {categories.map((cat) => (
@@ -193,17 +250,32 @@ export function StorefrontView({
           </div>
         ) : filtered.length === 0 ? (
           <div className="bg-white border border-slate-200 rounded-xl p-12 text-center">
-            <p className="text-sm text-slate-600 mb-4">ไม่พบสินค้าที่ตรงกับคำค้นหา</p>
-            <button
-              type="button"
-              onClick={() => {
-                setSearch('');
-                setCategory('All');
-              }}
-              className="px-4 py-2 text-sm font-medium text-slate-900 bg-slate-100 rounded-lg hover:bg-slate-200 transition-colors"
-            >
-              Reset Filters
-            </button>
+            <p className="text-sm text-slate-600 mb-4">
+              {lang === 'th' ? 'ไม่พบสินค้าที่ตรงกับคำค้นหาในรายการปัจจุบัน' : 'No matching products in current list'}
+            </p>
+            <div className="flex flex-wrap items-center justify-center gap-3">
+              {search.trim() && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const trimmed = search.trim();
+                    setCategory('All');
+                    setActiveRemoteQuery(trimmed);
+                    onSearchCatalog?.(trimmed);
+                  }}
+                  className="px-4 py-2 text-sm font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 transition-colors"
+                >
+                  {lang === 'th' ? `ค้นหา "${search.trim()}" จากคลัง CJ จริง` : `Search "${search.trim()}" on CJ`}
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={handleResetFilters}
+                className="px-4 py-2 text-sm font-medium text-slate-900 bg-slate-100 rounded-lg hover:bg-slate-200 transition-colors"
+              >
+                Reset Filters
+              </button>
+            </div>
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">

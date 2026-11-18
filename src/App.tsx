@@ -8,7 +8,7 @@ import {
   commitAtomicCheckout,
   commitMarketplaceOrAuctionCheckout,
   ensureMemberProfile,
-  signInWithGoogle,
+  sendOrderConfirmationEmail,
   signOutUser,
   subscribeAuctions,
   subscribeMemberListings,
@@ -26,6 +26,7 @@ import { DashboardView } from './components/DashboardView';
 import { NetworkView } from './components/NetworkView';
 import { DropshipView } from './components/DropshipView';
 import { AdminView } from './components/AdminView';
+import { AuthModal, type AuthModalMode } from './components/AuthModal';
 import { CURATED_CJ_CATALOG } from './data/curatedCatalog';
 import {
   CheckoutDrawer,
@@ -62,6 +63,8 @@ function AppShell() {
 
   const [products, setProducts] = useState<ProductItem[]>(CURATED_CJ_CATALOG);
   const [loadingProducts, setLoadingProducts] = useState(true);
+  const [cjSource, setCjSource] = useState<string>('catalog_sync');
+  const [usdToThbRate, setUsdToThbRate] = useState<number>(34.5);
   const [memberListings, setMemberListings] = useState<MemberListingRecord[]>([]);
   const [auctions, setAuctions] = useState<AuctionRecord[]>([]);
 
@@ -78,6 +81,10 @@ function AppShell() {
   const [directTarget, setDirectTarget] = useState<DirectCheckoutTarget | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [logoModalOpen, setLogoModalOpen] = useState(false);
+  const [authModalOpen, setAuthModalOpen] = useState(false);
+  const [authModalMode, setAuthModalMode] = useState<AuthModalMode>('login');
+  const [authInitialEmail, setAuthInitialEmail] = useState('');
+  const [capturedRefCode, setCapturedRefCode] = useState('');
   const [verifyingCallback, setVerifyingCallback] = useState(false);
   const [callbackNotice, setCallbackNotice] = useState('');
   const [externalReceipt, setExternalReceipt] = useState<CheckoutReceiptData | null>(null);
@@ -85,14 +92,47 @@ function AppShell() {
 
   const t = COPY[lang];
 
-  const loadCatalog = useCallback(async () => {
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const refParam = params.get('ref');
+    if (refParam && refParam.trim().length >= 4) {
+      const cleanRef = refParam.trim().toUpperCase();
+      setCapturedRefCode(cleanRef);
+      localStorage.setItem('vela_ref_code', cleanRef);
+    } else {
+      const savedRef = localStorage.getItem('vela_ref_code');
+      if (savedRef) setCapturedRefCode(savedRef);
+    }
+
+    const authParam = params.get('auth');
+    if (authParam === 'reset' || authParam === 'login' || authParam === 'register') {
+      setAuthModalMode(authParam);
+      setAuthModalOpen(true);
+    }
+  }, []);
+
+  const loadCatalog = useCallback(async (searchQuery?: string) => {
     setLoadingProducts(true);
     try {
-      const res = await fetch('/api/cj/products');
+      const cleanQ = typeof searchQuery === 'string' ? searchQuery.trim() : '';
+      const url = cleanQ ? `/api/cj/products?q=${encodeURIComponent(cleanQ)}` : '/api/cj/products';
+      const res = await fetch(url);
       if (!res.ok) return;
-      const data = (await res.json()) as { products?: ProductItem[] };
-      if (Array.isArray(data.products) && data.products.length > 0) {
-        setProducts(data.products);
+      const data = (await res.json()) as {
+        source?: string;
+        usdToThbRate?: number;
+        products?: ProductItem[];
+      };
+      if (data.source) {
+        setCjSource(data.source);
+      }
+      if (typeof data.usdToThbRate === 'number' && Number.isFinite(data.usdToThbRate)) {
+        setUsdToThbRate(data.usdToThbRate);
+      }
+      if (Array.isArray(data.products)) {
+        if (data.products.length > 0 || cleanQ) {
+          setProducts(data.products);
+        }
       }
     } catch {
       // Keep CURATED_CJ_CATALOG fallback visible
@@ -110,7 +150,7 @@ function AppShell() {
       setUser(nextUser);
       setAuthReady(true);
       if (nextUser) {
-        await ensureMemberProfile(nextUser);
+        await ensureMemberProfile(nextUser, localStorage.getItem('vela_ref_code') || undefined);
         const adminStatus = await checkIsAdminUser(nextUser);
         setIsAdmin(adminStatus);
         if (!adminStatus) {
@@ -188,10 +228,11 @@ function AppShell() {
     }
     if (!user) {
       setDrawerOpen(true);
+      setAuthModalMode('login');
       setCallbackNotice(
         lang === 'th'
-          ? 'ระบบตรวจพบการชำระเงินกลับมาแล้ว กรุณากด "เข้าสู่ระบบด้วย Google" เพื่อยืนยันสิทธิ์และบันทึกคำสั่งซื้อเข้าบัญชีของคุณ'
-          : 'Returned from VelaPayment. Please sign in with Google to finalize and record your paid order.'
+          ? 'ระบบตรวจพบการชำระเงินกลับมาแล้ว กรุณาเข้าสู่ระบบด้วยอีเมล/รหัสผ่าน หรือ Google เพื่อยืนยันสิทธิ์และบันทึกคำสั่งซื้อเข้าบัญชีของคุณ'
+          : 'Returned from VelaPayment. Please sign in to finalize and record your paid order.'
       );
       return;
     }
@@ -249,6 +290,18 @@ function AppShell() {
             ? 'VelaPayment · Stripe Card'
             : 'VelaPayment · PromptPay QR';
 
+        const targetEmail = pending.customerEmail || user.email || privateInfo?.email || '';
+        const targetRefCode = pending.referralCode || profile.referralCode;
+        const targetItemSummary = pending.directTarget
+          ? pending.directTarget.kind === 'marketplace'
+            ? `${pending.directTarget.listing.title} (x${pending.directTarget.quantity})`
+            : `Auction Win: ${pending.directTarget.auction.title}`
+          : pending.cart.length > 0
+          ? `${lang === 'th' ? pending.cart[0].product.titleTh : pending.cart[0].product.title}${
+              pending.cart.length > 1 ? ` (+${pending.cart.length - 1})` : ''
+            }`
+          : `Vela Commerce Order ${pending.orderNumber}`;
+
         if (
           (pending.checkoutType === 'marketplace' || pending.checkoutType === 'auction') &&
           pending.directTarget
@@ -283,11 +336,24 @@ function AppShell() {
             orderNumber: pending.orderNumber,
             shipping: pending.shipping,
           });
+          const emailResult = targetEmail
+            ? await sendOrderConfirmationEmail({
+                toEmail: targetEmail,
+                customerName: pending.shipping.recipientName || profile.displayName,
+                orderNumber: result.orderNumber,
+                itemSummary: targetItemSummary,
+                totalAmount: pending.amount,
+                intentId,
+                referralCode: targetRefCode,
+                temporaryPassword: pending.autoCreatedPassword || null,
+              })
+            : null;
           setDirectTarget(null);
           setExternalReceipt({
             ...result,
             receiptHash: verifyData.receiptHash || verifyData.hmacSignature,
             intentId,
+            emailResult,
           });
         } else {
           const result = await commitAtomicCheckout({
@@ -306,11 +372,24 @@ function AppShell() {
             sponsorReferralCode: pending.sponsorReferralCode,
             shipping: pending.shipping,
           });
+          const emailResult = targetEmail
+            ? await sendOrderConfirmationEmail({
+                toEmail: targetEmail,
+                customerName: pending.shipping.recipientName || profile.displayName,
+                orderNumber: result.orderNumber,
+                itemSummary: targetItemSummary,
+                totalAmount: pending.amount,
+                intentId,
+                referralCode: targetRefCode,
+                temporaryPassword: pending.autoCreatedPassword || null,
+              })
+            : null;
           setCart([]);
           setExternalReceipt({
             ...result,
             receiptHash: verifyData.receiptHash || verifyData.hmacSignature,
             intentId,
+            emailResult,
           });
         }
 
@@ -325,10 +404,16 @@ function AppShell() {
         window.history.replaceState({}, '', window.location.pathname);
       }
     })();
-  }, [authReady, user, profile, membersLoaded, networkMembers, handledCallbackIntent, lang]);
+  }, [authReady, user, profile, privateInfo, membersLoaded, networkMembers, handledCallbackIntent, lang]);
+
+  const openAuthModal = (mode: AuthModalMode = 'login', initialEmail = '') => {
+    setAuthModalMode(mode);
+    setAuthInitialEmail(initialEmail);
+    setAuthModalOpen(true);
+  };
 
   const handleSignIn = async () => {
-    await signInWithGoogle();
+    openAuthModal('login');
   };
 
   const handleAddToCart = (product: ProductItem) => {
@@ -555,11 +640,11 @@ function AppShell() {
             ) : (
               <button
                 type="button"
-                onClick={handleSignIn}
+                onClick={() => openAuthModal('login')}
                 className="inline-flex items-center gap-1.5 px-3 py-1 text-slate-900 font-medium bg-slate-100 hover:bg-slate-200 rounded-md transition-colors whitespace-nowrap"
               >
                 <LogIn className="w-3.5 h-3.5" />
-                <span>{t.signIn}</span>
+                <span>{lang === 'th' ? 'เข้าสู่ระบบ / สมัครสมาชิก' : 'Sign In / Register'}</span>
               </button>
             )}
           </div>
@@ -590,6 +675,9 @@ function AppShell() {
                 lang={lang}
                 products={products}
                 loadingProducts={loadingProducts}
+                cjSource={cjSource}
+                usdToThbRate={usdToThbRate}
+                onSearchCatalog={loadCatalog}
                 onAddToCart={handleAddToCart}
                 onNavigateDashboard={() => navigateMemberTab('dashboard')}
                 onOpenMediaKit={() => setLogoModalOpen(true)}
@@ -680,6 +768,15 @@ function AppShell() {
         products={products}
       />
 
+      <AuthModal
+        open={authModalOpen}
+        initialMode={authModalMode}
+        initialEmail={authInitialEmail}
+        defaultSponsorCode={capturedRefCode}
+        lang={lang}
+        onClose={() => setAuthModalOpen(false)}
+      />
+
       <CheckoutDrawer
         open={drawerOpen}
         onClose={() => setDrawerOpen(false)}
@@ -690,13 +787,15 @@ function AppShell() {
         allMembers={activeNetworkMembers}
         cart={cart}
         directTarget={directTarget}
+        defaultSponsorCode={capturedRefCode}
         onUpdateDirectQty={handleUpdateDirectQty}
         onClearDirectTarget={() => setDirectTarget(null)}
         onUpdateQty={handleUpdateQty}
         onRemoveItem={handleRemoveItem}
         onClearCart={() => setCart([])}
-        onSignIn={handleSignIn}
+        onOpenAuthModal={(mode, initEmail) => openAuthModal(mode, initEmail || '')}
         onGoDropship={() => navigateMemberTab('dropship')}
+        onGoDashboard={() => navigateMemberTab('dashboard')}
         verifyingCallback={verifyingCallback}
         callbackNotice={callbackNotice}
         externalReceipt={externalReceipt}

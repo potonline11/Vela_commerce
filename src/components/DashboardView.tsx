@@ -1,9 +1,13 @@
 import React, { useState } from 'react';
-import { CheckCircle2, ShieldCheck, Wallet } from 'lucide-react';
+import { CheckCircle2, Copy, KeyRound, Link2, Mail, ShieldCheck, Wallet } from 'lucide-react';
 import type { User } from 'firebase/auth';
 import type { Lang } from '../i18n';
 import { COPY } from '../i18n';
-import { submitPayoutWithdrawal } from '../services/commerceService';
+import {
+  sendMemberPasswordReset,
+  submitPayoutWithdrawal,
+  updateMemberPassword,
+} from '../services/commerceService';
 import type {
   CommissionRecord,
   MemberProfile,
@@ -37,6 +41,15 @@ export function DashboardView({
   const [payoutMsg, setPayoutMsg] = useState('');
   const [submittingPayout, setSubmittingPayout] = useState(false);
   const [verifyResults, setVerifyResults] = useState<Record<string, { verified: boolean; mode: string }>>({});
+
+  // Member Account & Reset Password state
+  const [copiedRef, setCopiedRef] = useState(false);
+  const [showPwdForm, setShowPwdForm] = useState(false);
+  const [currentPwd, setCurrentPwd] = useState('');
+  const [newPwd, setNewPwd] = useState('');
+  const [needsReauth, setNeedsReauth] = useState(false);
+  const [pwdBusy, setPwdBusy] = useState(false);
+  const [pwdFeedback, setPwdFeedback] = useState('');
 
   const formatThb = (val: number) =>
     new Intl.NumberFormat('th-TH', { style: 'currency', currency: 'THB', maximumFractionDigits: 0 }).format(val);
@@ -102,11 +115,196 @@ export function DashboardView({
     }));
   };
 
+  const referralLink =
+    typeof window !== 'undefined' && profile?.referralCode
+      ? `${window.location.origin}/?ref=${encodeURIComponent(profile.referralCode)}`
+      : '';
+
+  const handleCopyReferralLink = () => {
+    if (!referralLink) return;
+    navigator.clipboard.writeText(referralLink).catch(() => {});
+    setCopiedRef(true);
+    setTimeout(() => setCopiedRef(false), 2000);
+  };
+
+  const handleSendResetEmail = async () => {
+    const email = user.email;
+    if (!email) return;
+    setPwdBusy(true);
+    setPwdFeedback('');
+    try {
+      await sendMemberPasswordReset(email);
+      setPwdFeedback(
+        lang === 'th'
+          ? `ส่งลิงก์ Reset Password ไปยัง ${email} เรียบร้อยแล้ว`
+          : `Password reset email sent to ${email}.`
+      );
+    } catch (err) {
+      setPwdFeedback(err instanceof Error ? err.message : 'Unable to send reset email');
+    } finally {
+      setPwdBusy(false);
+    }
+  };
+
+  const handleUpdatePassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setPwdBusy(true);
+    setPwdFeedback('');
+    try {
+      await updateMemberPassword(newPwd, currentPwd || undefined);
+      setNewPwd('');
+      setCurrentPwd('');
+      setNeedsReauth(false);
+      setShowPwdForm(false);
+      setPwdFeedback(
+        lang === 'th' ? 'ตั้งรหัสผ่านใหม่สำเร็จแล้ว' : 'Password updated successfully.'
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('requires-recent-login')) {
+        setNeedsReauth(true);
+        setPwdFeedback(
+          lang === 'th'
+            ? 'เพื่อความปลอดภัย กรุณากรอกรหัสผ่านเดิมเพื่อยืนยัน หรือกดปุ่ม "ส่งอีเมล Reset Password" แทน'
+            : 'Please enter your current password to confirm, or use Send Reset Email.'
+        );
+      } else {
+        setPwdFeedback(msg);
+      }
+    } finally {
+      setPwdBusy(false);
+    }
+  };
+
   return (
     <div className="space-y-10">
       <div className="border-b border-slate-200 pb-6">
         <h1 className="text-2xl font-semibold text-slate-900 tracking-tight">{t.dashboardTitle}</h1>
         <p className="text-sm text-slate-600 mt-1.5 max-w-2xl">{t.dashboardSubtitle}</p>
+      </div>
+
+      {/* Member Credentials, Referral Link & Password Reset Card */}
+      <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-4">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+          <div className="space-y-1">
+            <h2 className="text-sm font-semibold text-slate-900">
+              {lang === 'th'
+                ? 'บัญชีสมาชิก · ลิงก์แนะนำส่วนตัว & รีเซ็ตรหัสผ่าน'
+                : 'Member Credentials · Referral Link & Password Reset'}
+            </h2>
+            <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-xs text-slate-600">
+              <span>
+                Username:{' '}
+                <strong className="font-mono text-slate-900">{user.email || profile?.uid}</strong>
+              </span>
+              {profile?.referralCode && (
+                <span>
+                  {lang === 'th' ? 'รหัสแนะนำ' : 'Referral Code'}:{' '}
+                  <strong className="font-mono text-emerald-700">{profile.referralCode}</strong>
+                </span>
+              )}
+              <span>
+                {lang === 'th' ? 'ระดับสมาชิก' : 'Rank'}:{' '}
+                <strong className="text-slate-900">{profile?.rank || 'Bronze'}</strong>
+              </span>
+            </div>
+            {referralLink && (
+              <div className="flex flex-wrap items-center gap-2 pt-1">
+                <span className="inline-flex items-center gap-1 text-xs text-slate-500">
+                  <Link2 className="w-3.5 h-3.5" />
+                  {lang === 'th' ? 'ลิงก์แนะนำ:' : 'Referral Link:'}
+                </span>
+                <code className="text-xs font-mono bg-slate-50 border border-slate-200 px-2.5 py-1 rounded-md text-slate-800 break-all">
+                  {referralLink}
+                </code>
+                <button
+                  type="button"
+                  onClick={handleCopyReferralLink}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md transition-colors"
+                >
+                  <Copy className="w-3 h-3" />
+                  <span>{copiedRef ? (lang === 'th' ? 'คัดลอกแล้ว' : 'Copied') : lang === 'th' ? 'คัดลอกลิงก์' : 'Copy Link'}</span>
+                </button>
+              </div>
+            )}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+            <button
+              type="button"
+              disabled={pwdBusy || !user.email}
+              onClick={handleSendResetEmail}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-slate-800 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 disabled:opacity-50 transition-colors"
+            >
+              <Mail className="w-3.5 h-3.5" />
+              <span>{lang === 'th' ? 'ส่งอีเมล Reset Password' : 'Send Reset Email'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setShowPwdForm((prev) => !prev);
+                setPwdFeedback('');
+              }}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 transition-colors"
+            >
+              <KeyRound className="w-3.5 h-3.5" />
+              <span>{lang === 'th' ? 'ตั้งรหัสผ่านใหม่ / Reset Password' : 'Reset Password'}</span>
+            </button>
+          </div>
+        </div>
+
+        {pwdFeedback && (
+          <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-800">
+            {pwdFeedback}
+          </div>
+        )}
+
+        {showPwdForm && (
+          <form onSubmit={handleUpdatePassword} className="pt-3 border-t border-slate-200 grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
+            {needsReauth && (
+              <div>
+                <label className="text-xs text-slate-600 block mb-1">
+                  {lang === 'th' ? 'รหัสผ่านปัจจุบัน' : 'Current Password'}
+                </label>
+                <input
+                  type="password"
+                  required
+                  value={currentPwd}
+                  onChange={(e) => setCurrentPwd(e.target.value)}
+                  placeholder="••••••••"
+                  className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg"
+                />
+              </div>
+            )}
+            <div className={needsReauth ? '' : 'sm:col-span-2'}>
+              <label className="text-xs text-slate-600 block mb-1">
+                {lang === 'th' ? 'รหัสผ่านใหม่ (อย่างน้อย 6 ตัวอักษร)' : 'New Password (min 6 chars)'}
+              </label>
+              <input
+                type="password"
+                required
+                minLength={6}
+                value={newPwd}
+                onChange={(e) => setNewPwd(e.target.value)}
+                placeholder="••••••••"
+                className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg"
+              />
+            </div>
+            <button
+              type="submit"
+              disabled={pwdBusy}
+              className="px-4 py-2 text-sm font-medium text-white bg-emerald-700 rounded-lg hover:bg-emerald-800 disabled:opacity-50"
+            >
+              {pwdBusy
+                ? lang === 'th'
+                  ? 'กำลังบันทึก...'
+                  : 'Updating...'
+                : lang === 'th'
+                ? 'บันทึกรหัสผ่านใหม่'
+                : 'Save New Password'}
+            </button>
+          </form>
+        )}
       </div>
 
       {/* KPI Grid */}

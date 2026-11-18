@@ -14,13 +14,26 @@ import {
   Timestamp,
   type Unsubscribe,
 } from 'firebase/firestore';
-import { signInWithPopup, signOut, type User } from 'firebase/auth';
+import {
+  createUserWithEmailAndPassword,
+  EmailAuthProvider,
+  reauthenticateWithCredential,
+  sendEmailVerification,
+  sendPasswordResetEmail,
+  signInWithEmailAndPassword,
+  signInWithPopup,
+  signOut,
+  updatePassword,
+  updateProfile,
+  type User,
+} from 'firebase/auth';
 import { auth, db, googleProvider, handleFirestoreError, OperationType } from '../firebase';
 import type {
   AuctionBidRecord,
   AuctionRecord,
   CartItem,
   CommissionRecord,
+  EmailConfirmationResult,
   ItemCondition,
   MemberListingRecord,
   MemberPrivateInfo,
@@ -61,16 +74,70 @@ export function calculateRank(personalVolume: number, teamVolume: number): Membe
   return 'Bronze';
 }
 
+export function generateSecureTempPassword(): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
+  const bytes = new Uint8Array(10);
+  window.crypto.getRandomValues(bytes);
+  let pwd = 'Vela#';
+  for (let i = 0; i < bytes.length; i += 1) {
+    pwd += chars[bytes[i] % chars.length];
+  }
+  return pwd;
+}
+
 export async function signInWithGoogle(): Promise<User> {
   const cred = await signInWithPopup(auth, googleProvider);
   return cred.user;
+}
+
+export async function signInWithEmail(email: string, password: string): Promise<User> {
+  const cred = await signInWithEmailAndPassword(auth, email.trim(), password);
+  return cred.user;
+}
+
+export async function registerWithEmail(
+  email: string,
+  password: string,
+  displayName: string,
+  sponsorReferralCode?: string
+): Promise<{ user: User; profile: MemberProfile }> {
+  const cred = await createUserWithEmailAndPassword(auth, email.trim(), password);
+  const cleanName = displayName.trim().slice(0, 80);
+  if (cleanName) {
+    await updateProfile(cred.user, { displayName: cleanName }).catch(() => {});
+  }
+  sendEmailVerification(cred.user).catch(() => {});
+  const profile = await ensureMemberProfile(cred.user, sponsorReferralCode);
+  return { user: cred.user, profile };
+}
+
+export async function sendMemberPasswordReset(email: string): Promise<void> {
+  await sendPasswordResetEmail(auth, email.trim());
+}
+
+export async function updateMemberPassword(
+  newPassword: string,
+  currentPassword?: string
+): Promise<void> {
+  const currentUser = auth.currentUser;
+  if (!currentUser) {
+    throw new Error('กรุณาเข้าสู่ระบบก่อนเปลี่ยนรหัสผ่าน');
+  }
+  if (currentPassword && currentUser.email) {
+    const credential = EmailAuthProvider.credential(currentUser.email, currentPassword);
+    await reauthenticateWithCredential(currentUser, credential);
+  }
+  await updatePassword(currentUser, newPassword);
 }
 
 export async function signOutUser(): Promise<void> {
   await signOut(auth);
 }
 
-export async function ensureMemberProfile(user: User, sponsorReferralCode?: string): Promise<void> {
+export async function ensureMemberProfile(
+  user: User,
+  sponsorReferralCode?: string
+): Promise<MemberProfile> {
   const memberRef = doc(db, 'members', user.uid);
   let snap;
   try {
@@ -79,12 +146,16 @@ export async function ensureMemberProfile(user: User, sponsorReferralCode?: stri
     handleFirestoreError(err, OperationType.GET, `members/${user.uid}`);
   }
 
+  const storedRef =
+    sponsorReferralCode?.trim() ||
+    (typeof window !== 'undefined' ? localStorage.getItem('vela_ref_code') || '' : '');
+
   let resolvedSponsorUid = '';
-  if (sponsorReferralCode && sponsorReferralCode.trim().length >= 4) {
+  if (storedRef && storedRef.trim().length >= 4) {
     try {
       const q = query(
         collection(db, 'members'),
-        where('referralCode', '==', sponsorReferralCode.trim().toUpperCase()),
+        where('referralCode', '==', storedRef.trim().toUpperCase()),
         where('status', '==', 'active')
       );
       const sponsorMatches = await getDocs(q);
@@ -104,7 +175,7 @@ export async function ensureMemberProfile(user: User, sponsorReferralCode?: stri
     const displayName = (user.displayName || user.email?.split('@')[0] || 'Member').slice(0, 80);
     const batch = writeBatch(db);
 
-    batch.set(memberRef, {
+    const newProfile: MemberProfile = {
       uid: user.uid,
       displayName,
       referralCode: cleanCode,
@@ -116,6 +187,10 @@ export async function ensureMemberProfile(user: User, sponsorReferralCode?: stri
       totalCommissionEarned: 0,
       walletBalance: 0,
       status: 'active',
+    };
+
+    batch.set(memberRef, {
+      ...newProfile,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
@@ -135,7 +210,11 @@ export async function ensureMemberProfile(user: User, sponsorReferralCode?: stri
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, `members/${user.uid}`);
     }
+
+    return newProfile;
   }
+
+  return snap.data() as MemberProfile;
 }
 
 export async function updateMemberPrivateContact(
@@ -1284,4 +1363,44 @@ export async function commitMarketplaceOrAuctionCheckout(
     sellerNetAmount,
     commissionsDistributed: [],
   };
+}
+
+export async function sendOrderConfirmationEmail(params: {
+  toEmail: string;
+  customerName: string;
+  orderNumber: string;
+  itemSummary: string;
+  totalAmount: number;
+  intentId?: string;
+  referralCode: string;
+  temporaryPassword?: string | null;
+}): Promise<EmailConfirmationResult> {
+  const originUrl = typeof window !== 'undefined' ? window.location.origin : 'https://velacommerce.vercel.app';
+  const fallbackLink = `${originUrl}/?ref=${encodeURIComponent(params.referralCode || 'VELA-MEMBER')}`;
+  try {
+    const res = await fetch('/api/emails/order-confirmation', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...params,
+        originUrl,
+      }),
+    });
+    const text = await res.text();
+    const data = JSON.parse(text) as EmailConfirmationResult;
+    return data;
+  } catch {
+    return {
+      sent: false,
+      provider: 'none',
+      toEmail: params.toEmail,
+      username: params.toEmail,
+      temporaryPassword: params.temporaryPassword || null,
+      referralCode: params.referralCode,
+      referralLink: fallbackLink,
+      loginUrl: `${originUrl}/?auth=login`,
+      resetPasswordUrl: `${originUrl}/?auth=reset`,
+      message: 'Unable to reach email automation endpoint',
+    };
+  }
 }
