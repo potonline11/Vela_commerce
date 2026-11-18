@@ -26,6 +26,7 @@ import { DashboardView } from './components/DashboardView';
 import { NetworkView } from './components/NetworkView';
 import { DropshipView } from './components/DropshipView';
 import { AdminView } from './components/AdminView';
+import { CURATED_CJ_CATALOG } from './data/curatedCatalog';
 import {
   CheckoutDrawer,
   type CheckoutReceiptData,
@@ -53,12 +54,13 @@ type WorkspaceMode = 'member' | 'admin';
 function AppShell() {
   const [lang, setLang] = useState<Lang>('th');
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('member');
+  const [adminInitialSection, setAdminInitialSection] = useState<'overview' | 'system_cj'>('overview');
   const [activeTab, setActiveTab] = useState<ActiveTab>('storefront');
   const [user, setUser] = useState<User | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
   const [authReady, setAuthReady] = useState(false);
 
-  const [products, setProducts] = useState<ProductItem[]>([]);
+  const [products, setProducts] = useState<ProductItem[]>(CURATED_CJ_CATALOG);
   const [loadingProducts, setLoadingProducts] = useState(true);
   const [memberListings, setMemberListings] = useState<MemberListingRecord[]>([]);
   const [auctions, setAuctions] = useState<AuctionRecord[]>([]);
@@ -87,10 +89,13 @@ function AppShell() {
     setLoadingProducts(true);
     try {
       const res = await fetch('/api/cj/products');
+      if (!res.ok) return;
       const data = (await res.json()) as { products?: ProductItem[] };
-      if (Array.isArray(data.products)) {
+      if (Array.isArray(data.products) && data.products.length > 0) {
         setProducts(data.products);
       }
+    } catch {
+      // Keep CURATED_CJ_CATALOG fallback visible
     } finally {
       setLoadingProducts(false);
     }
@@ -567,6 +572,7 @@ function AppShell() {
           <AdminView
             lang={lang}
             user={user}
+            initialSection={adminInitialSection}
             allMembers={networkMembers}
             orders={orders}
             commissions={commissions}
@@ -628,9 +634,14 @@ function AppShell() {
               <DropshipView
                 lang={lang}
                 user={user}
+                isAdmin={isAdmin}
                 orders={memberOrders}
                 products={products}
                 onRefreshCatalog={loadCatalog}
+                onOpenAdminCjSetup={() => {
+                  setAdminInitialSection('system_cj');
+                  setWorkspaceMode('admin');
+                }}
                 onSignIn={handleSignIn}
               />
             )}

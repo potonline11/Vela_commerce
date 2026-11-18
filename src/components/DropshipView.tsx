@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Eye, EyeOff, PackageCheck, RefreshCw, Truck } from 'lucide-react';
+import { Eye, EyeOff, PackageCheck, RefreshCw, ShieldCheck, Truck } from 'lucide-react';
 import type { User } from 'firebase/auth';
 import type { Lang } from '../i18n';
 import { COPY } from '../i18n';
@@ -13,18 +13,22 @@ import type { CjStatusResponse, OrderRecord, OrderShippingPii, ProductItem } fro
 interface DropshipViewProps {
   lang: Lang;
   user: User | null;
+  isAdmin?: boolean;
   orders: OrderRecord[];
   products: ProductItem[];
   onRefreshCatalog: () => Promise<void>;
+  onOpenAdminCjSetup?: () => void;
   onSignIn: () => Promise<void>;
 }
 
 export function DropshipView({
   lang,
   user,
+  isAdmin = false,
   orders,
   products,
   onRefreshCatalog,
+  onOpenAdminCjSetup,
   onSignIn,
 }: DropshipViewProps) {
   const t = COPY[lang];
@@ -107,6 +111,33 @@ export function DropshipView({
           · {cjStatus?.warehouses?.join(' · ') || 'BKK-LOCAL-01'}
         </div>
       </div>
+
+      {isAdmin && onOpenAdminCjSetup && (
+        <div className="bg-white border border-slate-200 rounded-xl p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <ShieldCheck className="w-4 h-4 text-emerald-700 mt-0.5 shrink-0" />
+            <div className="text-xs text-slate-600 space-y-0.5">
+              <p className="font-semibold text-slate-900">
+                {lang === 'th'
+                  ? 'การตั้งค่า CJ Dropshipping API Key ถูกย้ายไปที่ศูนย์ควบคุม Admin แล้ว'
+                  : 'CJ Dropshipping API Key Setup Moved to Admin Console'}
+              </p>
+              <p>
+                {lang === 'th'
+                  ? 'เพื่อแยกส่วนผู้ดูแลระบบออกจากสมาชิก สามารถใส่ CJ API Key และทดสอบ VelaPayment ได้ที่เมนู CJ API 2.0 & Audit Logs'
+                  : 'For clean Admin vs Member separation, enter CJ API keys and verify gateway credentials inside Admin Console.'}
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onOpenAdminCjSetup}
+            className="px-4 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 whitespace-nowrap shrink-0"
+          >
+            {lang === 'th' ? 'เปิดหน้าใส่ CJ API Key (Admin)' : 'Open Admin CJ API Setup'}
+          </button>
+        </div>
+      )}
 
       {/* Member Catalog Wholesale & MLM Margin Reference */}
       <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">

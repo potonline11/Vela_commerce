@@ -45,6 +45,7 @@ type AdminSection = 'overview' | 'payouts' | 'members' | 'orders_market' | 'syst
 interface AdminViewProps {
   lang: Lang;
   user: User;
+  initialSection?: AdminSection;
   allMembers: MemberProfile[];
   orders: OrderRecord[];
   commissions: CommissionRecord[];
@@ -59,6 +60,7 @@ interface AdminViewProps {
 export function AdminView({
   lang,
   user,
+  initialSection = 'overview',
   allMembers,
   orders,
   commissions,
@@ -69,7 +71,11 @@ export function AdminView({
   securityLogs,
   onRefreshCatalog,
 }: AdminViewProps) {
-  const [section, setSection] = useState<AdminSection>('overview');
+  const [section, setSection] = useState<AdminSection>(initialSection);
+
+  useEffect(() => {
+    setSection(initialSection);
+  }, [initialSection]);
   const [memberSearch, setMemberSearch] = useState('');
   const [busyId, setBusyId] = useState<string | null>(null);
   const [actionMsg, setActionMsg] = useState('');

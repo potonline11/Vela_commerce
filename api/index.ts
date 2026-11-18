@@ -232,6 +232,19 @@ export function createApiApp() {
   app.disable('x-powered-by');
   app.use(express.json({ limit: '256kb' }));
 
+  // Normalize Vercel rewrite path (/api/index?__path=cj/products -> /api/cj/products)
+  app.use((req: Request, _res: Response, next: NextFunction) => {
+    const rawPath = req.query?.__path;
+    if (typeof rawPath === 'string' && rawPath.length > 0) {
+      const cleanSub = rawPath.replace(/^\/+/, '');
+      const urlObj = new URL(req.url, 'http://localhost');
+      urlObj.searchParams.delete('__path');
+      const qs = urlObj.searchParams.toString();
+      req.url = `/api/${cleanSub}${qs ? `?${qs}` : ''}`;
+    }
+    next();
+  });
+
   // Hardened HTTP security headers
   app.use((_req: Request, res: Response, next: NextFunction) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -313,7 +326,7 @@ export function createApiApp() {
       if (!secret) {
         res.status(503).json({
           error:
-            'PAYMENT_GATEWAY_SECRET ยังไม่ได้ถูกตั้งค่าใน Environment Secrets กรุณาใส่ Merchant Secret Key จาก velapayment.vercel.app',
+            'PAYMENT_GATEWAY_SECRET ยังไม่ได้ถูกตั้งค่าใน Environment Variables กรุณาใส่ Merchant Secret Key จาก velapayment.vercel.app',
         });
         return;
       }
@@ -846,3 +859,6 @@ export function createApiApp() {
 
   return app;
 }
+
+const vercelApp = createApiApp();
+export default vercelApp;

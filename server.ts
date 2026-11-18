@@ -1,12 +1,10 @@
+import 'dotenv/config';
 import express from 'express';
 import type { Request, Response } from 'express';
 import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import dotenv from 'dotenv';
-import { createApiApp } from './src/server/apiApp';
-
-dotenv.config();
+import { createApiApp } from './api/index';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
