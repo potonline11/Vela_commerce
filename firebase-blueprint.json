@@ -1,0 +1,226 @@
+{
+  "entities": {
+    "Admin": {
+      "title": "Admin",
+      "description": "Authorized system administrator record",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "role": { "type": "string", "enum": ["super_admin", "ops_admin"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "role", "createdAt"]
+    },
+    "Member": {
+      "title": "Member",
+      "description": "Network-safe MLM and dropship member profile without PII",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "referralCode": { "type": "string", "minLength": 4, "maxLength": 24, "pattern": "^[A-Z0-9_\\-]+$" },
+        "sponsorUid": { "type": "string", "minLength": 0, "maxLength": 128 },
+        "rank": { "type": "string", "enum": ["Bronze", "Silver", "Gold", "Platinum", "Diamond"] },
+        "personalVolume": { "type": "number" },
+        "teamVolume": { "type": "number" },
+        "directCount": { "type": "integer" },
+        "totalCommissionEarned": { "type": "number" },
+        "walletBalance": { "type": "number" },
+        "lastCommissionId": { "type": "string", "minLength": 0, "maxLength": 128 },
+        "status": { "type": "string", "enum": ["active", "suspended"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "displayName", "referralCode", "rank", "personalVolume", "teamVolume", "directCount", "totalCommissionEarned", "walletBalance", "status", "createdAt", "updatedAt"]
+    },
+    "MemberPrivate": {
+      "title": "MemberPrivate",
+      "description": "Isolated PII contact and settlement details for a member",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "minLength": 3, "maxLength": 160 },
+        "phone": { "type": "string", "minLength": 0, "maxLength": 32 },
+        "shippingAddress": { "type": "string", "minLength": 0, "maxLength": 300 },
+        "promptPayMasked": { "type": "string", "minLength": 0, "maxLength": 32 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "updatedAt"]
+    },
+    "Product": {
+      "title": "Product",
+      "description": "CJ Dropshipping synchronized catalog item",
+      "type": "object",
+      "properties": {
+        "sku": { "type": "string", "minLength": 2, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "cjProductId": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "title": { "type": "string", "minLength": 2, "maxLength": 140 },
+        "category": { "type": "string", "minLength": 2, "maxLength": 60 },
+        "description": { "type": "string", "minLength": 4, "maxLength": 800 },
+        "imageUrl": { "type": "string", "minLength": 5, "maxLength": 500 },
+        "wholesaleCost": { "type": "number" },
+        "retailPrice": { "type": "number" },
+        "commissionPoolRate": { "type": "number" },
+        "stock": { "type": "integer" },
+        "warehouse": { "type": "string", "minLength": 2, "maxLength": 64 },
+        "weightGrams": { "type": "integer" },
+        "active": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["sku", "cjProductId", "title", "category", "description", "imageUrl", "wholesaleCost", "retailPrice", "commissionPoolRate", "stock", "warehouse", "weightGrams", "active", "createdAt", "updatedAt"]
+    },
+    "Order": {
+      "title": "Order",
+      "description": "E-commerce and dropship order record without street-level PII",
+      "type": "object",
+      "properties": {
+        "orderNumber": { "type": "string", "minLength": 4, "maxLength": 40, "pattern": "^[A-Z0-9_\\-]+$" },
+        "buyerUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "sellerUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "itemSku": { "type": "string", "minLength": 2, "maxLength": 64 },
+        "itemTitle": { "type": "string", "minLength": 2, "maxLength": 140 },
+        "quantity": { "type": "integer" },
+        "unitPrice": { "type": "number" },
+        "totalAmount": { "type": "number" },
+        "wholesaleCost": { "type": "number" },
+        "paymentIntentId": { "type": "string", "minLength": 4, "maxLength": 128 },
+        "paymentMethod": { "type": "string", "enum": ["promptpay", "card", "wallet"] },
+        "paymentSignature": { "type": "string", "minLength": 16, "maxLength": 128 },
+        "paymentStatus": { "type": "string", "enum": ["pending", "paid", "failed", "refunded"] },
+        "cjOrderId": { "type": "string", "minLength": 0, "maxLength": 80 },
+        "fulfillmentStatus": { "type": "string", "enum": ["queued", "synced_cj", "processing", "in_transit", "delivered", "cancelled"] },
+        "trackingNumber": { "type": "string", "minLength": 0, "maxLength": 80 },
+        "carrierName": { "type": "string", "minLength": 0, "maxLength": 64 },
+        "shippingCity": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["orderNumber", "buyerUid", "sellerUid", "itemSku", "itemTitle", "quantity", "unitPrice", "totalAmount", "wholesaleCost", "paymentIntentId", "paymentMethod", "paymentSignature", "paymentStatus", "fulfillmentStatus", "shippingCity", "createdAt", "updatedAt"]
+    },
+    "OrderShipping": {
+      "title": "OrderShipping",
+      "description": "Isolated recipient PII for an order",
+      "type": "object",
+      "properties": {
+        "orderId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "buyerUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "recipientName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "phone": { "type": "string", "minLength": 6, "maxLength": 32 },
+        "addressLine": { "type": "string", "minLength": 4, "maxLength": 240 },
+        "postalCode": { "type": "string", "minLength": 4, "maxLength": 16 },
+        "countryCode": { "type": "string", "minLength": 2, "maxLength": 4 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["orderId", "buyerUid", "recipientName", "phone", "addressLine", "postalCode", "countryCode", "createdAt"]
+    },
+    "Commission": {
+      "title": "Commission",
+      "description": "Multi-tier MLM commission payout record",
+      "type": "object",
+      "properties": {
+        "orderId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "orderNumber": { "type": "string", "minLength": 4, "maxLength": 40 },
+        "beneficiaryUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "sourceBuyerUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "tier": { "type": "integer" },
+        "ratePercent": { "type": "number" },
+        "commissionAmount": { "type": "number" },
+        "status": { "type": "string", "enum": ["credited", "paid", "reversed"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["orderId", "orderNumber", "beneficiaryUid", "sourceBuyerUid", "tier", "ratePercent", "commissionAmount", "status", "createdAt"]
+    },
+    "PaymentIntent": {
+      "title": "PaymentIntent",
+      "description": "Custom Payment Gateway signed transaction intent",
+      "type": "object",
+      "properties": {
+        "intentCode": { "type": "string", "minLength": 6, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "orderId": { "type": "string", "minLength": 0, "maxLength": 128 },
+        "amount": { "type": "number" },
+        "currency": { "type": "string", "enum": ["THB", "USD"] },
+        "method": { "type": "string", "enum": ["promptpay", "card", "wallet"] },
+        "maskedSource": { "type": "string", "minLength": 2, "maxLength": 48 },
+        "hmacSignature": { "type": "string", "minLength": 16, "maxLength": 128 },
+        "idempotencyKey": { "type": "string", "minLength": 8, "maxLength": 80 },
+        "status": { "type": "string", "enum": ["requires_confirmation", "authorized", "settled", "failed"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["intentCode", "ownerUid", "amount", "currency", "method", "maskedSource", "hmacSignature", "idempotencyKey", "status", "createdAt", "updatedAt"]
+    },
+    "PayoutRequest": {
+      "title": "PayoutRequest",
+      "description": "Member commission withdrawal request",
+      "type": "object",
+      "properties": {
+        "memberUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "amount": { "type": "number" },
+        "destinationMasked": { "type": "string", "minLength": 4, "maxLength": 48 },
+        "method": { "type": "string", "enum": ["promptpay", "bank_transfer"] },
+        "status": { "type": "string", "enum": ["pending", "approved", "completed", "rejected"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["memberUid", "amount", "destinationMasked", "method", "status", "createdAt", "updatedAt"]
+    },
+    "SecurityLog": {
+      "title": "SecurityLog",
+      "description": "Immutable security and payment verification audit log",
+      "type": "object",
+      "properties": {
+        "actorUid": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "action": { "type": "string", "minLength": 2, "maxLength": 64 },
+        "resourceType": { "type": "string", "minLength": 2, "maxLength": 48 },
+        "resourceId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "integrityHash": { "type": "string", "minLength": 16, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["actorUid", "action", "resourceType", "resourceId", "integrityHash", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/admins/{adminId}": {
+      "schema": { "$ref": "#/entities/Admin" },
+      "description": "System administrator allowlist"
+    },
+    "/members/{memberId}": {
+      "schema": { "$ref": "#/entities/Member" },
+      "description": "Network-safe MLM member profiles (no PII)"
+    },
+    "/members/{memberId}/private/{docId}": {
+      "schema": { "$ref": "#/entities/MemberPrivate" },
+      "description": "Isolated PII for a member (email, phone, shipping address)"
+    },
+    "/products/{productId}": {
+      "schema": { "$ref": "#/entities/Product" },
+      "description": "CJ Dropshipping synchronized catalog"
+    },
+    "/orders/{orderId}": {
+      "schema": { "$ref": "#/entities/Order" },
+      "description": "Customer and dropship orders with payment and CJ tracking state"
+    },
+    "/orders/{orderId}/shipping/{docId}": {
+      "schema": { "$ref": "#/entities/OrderShipping" },
+      "description": "Isolated shipping recipient PII bound to parent order"
+    },
+    "/commissions/{commissionId}": {
+      "schema": { "$ref": "#/entities/Commission" },
+      "description": "Multi-tier MLM commission ledger"
+    },
+    "/paymentIntents/{intentId}": {
+      "schema": { "$ref": "#/entities/PaymentIntent" },
+      "description": "Signed custom payment gateway transaction intents"
+    },
+    "/payoutRequests/{payoutId}": {
+      "schema": { "$ref": "#/entities/PayoutRequest" },
+      "description": "Member commission withdrawal requests"
+    },
+    "/securityLogs/{logId}": {
+      "schema": { "$ref": "#/entities/SecurityLog" },
+      "description": "Immutable cryptographic audit trail"
+    }
+  }
+}

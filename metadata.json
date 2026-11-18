@@ -1,0 +1,6 @@
+{
+  "name": "Vela Commerce",
+  "description": "Integrated e-commerce storefront with proprietary HMAC payment gateway, multi-tier MLM commission engine, real-time analytics dashboard, and automated CJ Dropshipping fulfillment.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
