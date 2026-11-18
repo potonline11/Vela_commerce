@@ -55,6 +55,8 @@ interface AdminViewProps {
   memberListings: MemberListingRecord[];
   auctions: AuctionRecord[];
   products: ProductItem[];
+  usdToThbRate: number;
+  markupPercent: number;
   securityLogs: SecurityLogRecord[];
   onRefreshCatalog: () => Promise<void>;
 }
@@ -70,6 +72,8 @@ export function AdminView({
   memberListings,
   auctions,
   products,
+  usdToThbRate,
+  markupPercent,
   securityLogs,
   onRefreshCatalog,
 }: AdminViewProps) {
@@ -84,12 +88,19 @@ export function AdminView({
   const [revealedPii, setRevealedPii] = useState<Record<string, OrderShippingPii | null>>({});
   const [verifyResults, setVerifyResults] = useState<Record<string, { verified: boolean; mode: string }>>({});
 
-  // CJ Dropshipping API 2.0 Credentials State (Admin-only)
+  // CJ Dropshipping API 2.0 Credentials & Markup State (Admin-only)
   const [cjStatus, setCjStatus] = useState<CjStatusResponse | null>(null);
   const [cjEmail, setCjEmail] = useState('');
   const [cjApiKey, setCjApiKey] = useState('');
   const [connectingCj, setConnectingCj] = useState(false);
   const [cjConnectMsg, setCjConnectMsg] = useState('');
+  const [markupInput, setMarkupInput] = useState<string>(String(markupPercent));
+  const [savingMarkup, setSavingMarkup] = useState(false);
+  const [markupMsg, setMarkupMsg] = useState('');
+
+  useEffect(() => {
+    setMarkupInput(String(markupPercent));
+  }, [markupPercent]);
 
   // VelaPayment Gateway Auth Diagnostic State
   const [gatewayDiag, setGatewayDiag] = useState<{
@@ -314,6 +325,36 @@ export function AdminView({
       setCjConnectMsg(err instanceof Error ? err.message : 'Unable to connect');
     } finally {
       setConnectingCj(false);
+    }
+  };
+
+  const handleSaveMarkup = async (nextPct: number) => {
+    const cleanPct = Math.round(nextPct);
+    if (!Number.isFinite(cleanPct) || cleanPct < 10 || cleanPct > 500) {
+      setMarkupMsg(lang === 'th' ? 'กรุณาระบุ % กำไรระหว่าง 10% - 500%' : 'Enter markup between 10% and 500%');
+      return;
+    }
+    setSavingMarkup(true);
+    setMarkupMsg('');
+    try {
+      const res = await fetch('/api/cj/markup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ markupPercent: cleanPct }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to update markup');
+      setMarkupInput(String(data.markupPercent));
+      await onRefreshCatalog();
+      setMarkupMsg(
+        lang === 'th'
+          ? `อัปเดตบวกกำไรเป็น +${data.markupPercent}% แล้ว (ตั้งค่า CJ_MARKUP_PERCENT=${data.markupPercent} ใน Vercel Env เพื่อให้ถาวร)`
+          : `Updated markup to +${data.markupPercent}% (set CJ_MARKUP_PERCENT=${data.markupPercent} in Vercel Env for persistence).`
+      );
+    } catch (err) {
+      setMarkupMsg(err instanceof Error ? err.message : 'Failed to update markup');
+    } finally {
+      setSavingMarkup(false);
     }
   };
 
@@ -1044,6 +1085,12 @@ export function AdminView({
                         {cjStatus?.warehouses?.join(' · ') || 'BKK-LOCAL-01 · CN-SZ-02'}
                       </span>
                     </div>
+                    <div>
+                      FX & Pricing:{' '}
+                      <span className="font-mono text-slate-900">
+                        1 USD = ฿{usdToThbRate.toFixed(2)} · Markup +{markupPercent}%
+                      </span>
+                    </div>
                   </div>
 
                   <form onSubmit={handleCjConnect} className="space-y-3">
@@ -1092,46 +1139,135 @@ export function AdminView({
                 </div>
 
                 <div className="lg:col-span-7 bg-white border border-slate-200 rounded-xl overflow-hidden">
-                  <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
-                    <h3 className="text-sm font-semibold text-slate-900">CJ Wholesale Margin Matrix</h3>
-                    <button
-                      type="button"
-                      onClick={onRefreshCatalog}
-                      className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-700 hover:text-slate-900"
-                    >
-                      <RefreshCw className="w-3.5 h-3.5" />
-                      <span>Sync SKUs</span>
-                    </button>
+                  <div className="px-5 py-4 border-b border-slate-200 space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <h3 className="text-sm font-semibold text-slate-900">
+                          {lang === 'th'
+                            ? 'ตารางต้นทุน CJ & กำไรสุทธิหลังบ้าน (เฉพาะ Admin)'
+                            : 'CJ Wholesale Margin & Net Profit Matrix (Admin Only)'}
+                        </h3>
+                        <p className="text-[11px] text-slate-500 mt-0.5">
+                          {lang === 'th'
+                            ? `1 USD = ฿${usdToThbRate.toFixed(2)} · หักคอมฯ MLM 4 ชั้น 22.5% + ค่า Gateway/โสหุ้ย ~8.5%`
+                            : `1 USD = ฿${usdToThbRate.toFixed(2)} · Less 22.5% 4-tier MLM + ~8.5% Gateway & overhead`}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={onRefreshCatalog}
+                        className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-700 hover:text-slate-900"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                        <span>Sync SKUs</span>
+                      </button>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-100 text-xs">
+                      <span className="text-slate-600 font-medium">
+                        {lang === 'th' ? 'บวกกำไร:' : 'Markup:'}
+                      </span>
+                      {[
+                        { pct: 65, label: '+65%' },
+                        { pct: 80, label: lang === 'th' ? '+80% (แนะนำ)' : '+80% (Rec)' },
+                        { pct: 100, label: '+100%' },
+                      ].map((preset) => (
+                        <button
+                          key={preset.pct}
+                          type="button"
+                          disabled={savingMarkup}
+                          onClick={() => handleSaveMarkup(preset.pct)}
+                          className={`px-2.5 py-1 rounded-md font-mono transition-colors ${
+                            markupPercent === preset.pct
+                              ? 'bg-slate-900 text-white'
+                              : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                          }`}
+                        >
+                          {preset.label}
+                        </button>
+                      ))}
+                      <div className="inline-flex items-center gap-1 ml-auto">
+                        <input
+                          type="number"
+                          min={10}
+                          max={500}
+                          value={markupInput}
+                          onChange={(e) => setMarkupInput(e.target.value)}
+                          className="w-16 px-2 py-1 text-xs font-mono border border-slate-200 rounded-md text-right"
+                        />
+                        <span className="text-slate-500">%</span>
+                        <button
+                          type="button"
+                          disabled={savingMarkup}
+                          onClick={() => handleSaveMarkup(Number(markupInput))}
+                          className="px-2.5 py-1 text-xs font-medium text-white bg-slate-900 rounded-md hover:bg-slate-800 disabled:opacity-50"
+                        >
+                          {lang === 'th' ? 'ปรับใช้' : 'Apply'}
+                        </button>
+                      </div>
+                    </div>
+                    {markupMsg && <p className="text-[11px] text-emerald-700">{markupMsg}</p>}
                   </div>
-                  <div className="overflow-x-auto">
+
+                  <div className="overflow-x-auto max-h-[420px]">
                     <table className="w-full text-left text-xs">
-                      <thead className="bg-slate-50 text-slate-500 border-b border-slate-200">
+                      <thead className="bg-slate-50 text-slate-500 border-b border-slate-200 sticky top-0">
                         <tr>
-                          <th className="py-2.5 px-4 font-medium">SKU</th>
-                          <th className="py-2.5 px-4 font-medium">Title</th>
-                          <th className="py-2.5 px-4 font-medium text-right">Cost</th>
-                          <th className="py-2.5 px-4 font-medium text-right">Retail</th>
-                          <th className="py-2.5 px-4 font-medium text-right">Stock</th>
+                          <th className="py-2.5 px-3 font-medium">SKU / Title</th>
+                          <th className="py-2.5 px-3 font-medium text-right">
+                            {lang === 'th' ? 'ทุน CJ ($ / ฿)' : 'CJ Cost'}
+                          </th>
+                          <th className="py-2.5 px-3 font-medium text-right">
+                            {lang === 'th' ? `ขาย (+${markupPercent}%)` : `Retail (+${markupPercent}%)`}
+                          </th>
+                          <th className="py-2.5 px-3 font-medium text-right">
+                            {lang === 'th' ? 'คอมฯ 22.5%' : 'MLM 22.5%'}
+                          </th>
+                          <th className="py-2.5 px-3 font-medium text-right">
+                            {lang === 'th' ? 'สุทธิโดยประมาณ' : 'Est. Net'}
+                          </th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100">
-                        {products.map((p) => (
-                          <tr key={p.sku}>
-                            <td className="py-2.5 px-4 font-mono text-slate-900">{p.sku}</td>
-                            <td className="py-2.5 px-4 text-slate-700 max-w-[180px] truncate">
-                              {lang === 'th' ? p.titleTh : p.title}
-                            </td>
-                            <td className="py-2.5 px-4 font-mono text-right tabular-nums text-slate-600">
-                              {formatThb(p.wholesaleCost)}
-                            </td>
-                            <td className="py-2.5 px-4 font-mono text-right tabular-nums font-semibold text-slate-900">
-                              {formatThb(p.retailPrice)}
-                            </td>
-                            <td className="py-2.5 px-4 font-mono text-right tabular-nums text-emerald-700">
-                              {p.stock}
-                            </td>
-                          </tr>
-                        ))}
+                        {products.map((p) => {
+                          const mlmCost = Math.round(p.retailPrice * 0.225);
+                          const overheadEst = Math.round(p.retailPrice * 0.085);
+                          const estNet = p.retailPrice - p.wholesaleCost - mlmCost - overheadEst;
+                          const netPct = p.retailPrice > 0 ? Math.round((estNet / p.retailPrice) * 100) : 0;
+
+                          return (
+                            <tr key={p.sku}>
+                              <td className="py-2.5 px-3 max-w-[190px]">
+                                <div className="font-mono text-slate-900 text-[11px]">{p.sku}</div>
+                                <div className="text-slate-600 truncate">
+                                  {lang === 'th' ? p.titleTh : p.title}
+                                </div>
+                              </td>
+                              <td className="py-2.5 px-3 font-mono text-right tabular-nums text-slate-600 whitespace-nowrap">
+                                {typeof p.wholesaleUsd === 'number' && (
+                                  <span className="text-[11px] text-slate-400 block">
+                                    ${p.wholesaleUsd.toFixed(2)}
+                                  </span>
+                                )}
+                                <span>{formatThb(p.wholesaleCost)}</span>
+                              </td>
+                              <td className="py-2.5 px-3 font-mono text-right tabular-nums font-semibold text-slate-900">
+                                {formatThb(p.retailPrice)}
+                              </td>
+                              <td className="py-2.5 px-3 font-mono text-right tabular-nums text-amber-700">
+                                -{formatThb(mlmCost)}
+                              </td>
+                              <td
+                                className={`py-2.5 px-3 font-mono text-right tabular-nums font-semibold whitespace-nowrap ${
+                                  estNet > 0 ? 'text-emerald-700' : 'text-rose-700'
+                                }`}
+                              >
+                                {estNet >= 0 ? `+${formatThb(estNet)}` : formatThb(estNet)}{' '}
+                                <span className="text-[10px] font-normal">({netPct}%)</span>
+                              </td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>

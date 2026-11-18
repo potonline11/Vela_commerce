@@ -19,6 +19,7 @@ export interface ProductItem {
   description: string;
   descriptionTh: string;
   imageUrl: string;
+  wholesaleUsd?: number;
   wholesaleCost: number;
   retailPrice: number;
   commissionPoolRate: number;
@@ -218,6 +219,7 @@ export interface CjStatusResponse {
   lastSyncedAt: string;
   warehouses: string[];
   catalogCount: number;
+  markupPercent?: number;
 }
 
 export interface EmailStatusResponse {

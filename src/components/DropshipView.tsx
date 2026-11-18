@@ -145,7 +145,7 @@ export function DropshipView({
           <div className="flex items-center gap-2">
             <PackageCheck className="w-4 h-4 text-slate-700" />
             <h2 className="text-base font-semibold text-slate-900">
-              {lang === 'th' ? 'ตารางต้นทุนสินค้า Dropship และสต็อกคลัง' : 'CJ Dropship Catalog & Stock Reference'}
+              {lang === 'th' ? 'รายการสินค้าและสต็อกพร้อมจัดส่ง' : 'Catalog & Stock Availability'}
             </h2>
           </div>
           <button
@@ -163,8 +163,7 @@ export function DropshipView({
               <tr>
                 <th className="py-3 px-5 font-medium">SKU</th>
                 <th className="py-3 px-5 font-medium">Product</th>
-                <th className="py-3 px-5 font-medium text-right">CJ Cost</th>
-                <th className="py-3 px-5 font-medium text-right">Retail</th>
+                <th className="py-3 px-5 font-medium text-right">Price</th>
                 <th className="py-3 px-5 font-medium text-right">Stock</th>
               </tr>
             </thead>
@@ -174,9 +173,6 @@ export function DropshipView({
                   <td className="py-3 px-5 font-mono text-xs text-slate-900">{p.sku}</td>
                   <td className="py-3 px-5 text-xs text-slate-700 max-w-[260px] truncate">
                     {lang === 'th' ? p.titleTh : p.title}
-                  </td>
-                  <td className="py-3 px-5 font-mono text-xs text-slate-600 text-right tabular-nums">
-                    {formatThb(p.wholesaleCost)}
                   </td>
                   <td className="py-3 px-5 font-mono text-xs font-semibold text-slate-900 text-right tabular-nums">
                     {formatThb(p.retailPrice)}

@@ -12,6 +12,7 @@ export interface CjProductRecord {
   description: string;
   descriptionTh: string;
   imageUrl: string;
+  wholesaleUsd?: number;
   wholesaleCost: number;
   retailPrice: number;
   commissionPoolRate: number;
@@ -76,6 +77,11 @@ function sanitizeShortText(input: unknown, maxLen: number): string {
 }
 
 const cleanEnvCjKey = (process.env.CJ_API_KEY || '').trim().replace(/^['"]|['"]$/g, '').trim();
+const parsedEnvMarkup = Number(process.env.CJ_MARKUP_PERCENT);
+let cjMarkupPercent =
+  Number.isFinite(parsedEnvMarkup) && parsedEnvMarkup >= 10 && parsedEnvMarkup <= 500
+    ? Math.round(parsedEnvMarkup)
+    : 80;
 
 let cjSessionState: {
   connected: boolean;
@@ -607,7 +613,18 @@ export function createApiApp() {
       lastSyncedAt: cjSessionState.lastSyncedAt,
       warehouses: ['BKK-LOCAL-01', 'CN-SZ-02', 'US-LA-02'],
       catalogCount: CURATED_CJ_CATALOG.length,
+      markupPercent: cjMarkupPercent,
     });
+  });
+
+  app.post('/api/cj/markup', (req: Request, res: Response) => {
+    const requested = Number(req.body?.markupPercent);
+    if (!Number.isFinite(requested) || requested < 10 || requested > 500) {
+      res.status(400).json({ error: 'markupPercent must be between 10 and 500' });
+      return;
+    }
+    cjMarkupPercent = Math.round(requested);
+    res.json({ markupPercent: cjMarkupPercent });
   });
 
   app.post('/api/cj/connect', async (req: Request, res: Response) => {
@@ -861,10 +878,13 @@ export function createApiApp() {
                 item.nowPrice ?? item.discountPrice ?? item.sellPrice
               );
               const wholesaleThb = Math.max(10, Math.round(usdPrice * usdToThbRate));
-              const retailThb = Math.max(10, Math.round(wholesaleThb * 1.3));
+              const retailThb = Math.max(
+                10,
+                Math.round(wholesaleThb * (1 + cjMarkupPercent / 100))
+              );
               const title =
                 sanitizeShortText(item.nameEn || item.productNameEn || item.productName, 140) ||
-                `CJ Product #${idx + 1}`;
+                `Vela Item #${idx + 1}`;
               const cat =
                 sanitizeShortText(
                   item.threeCategoryName ||
@@ -872,7 +892,7 @@ export function createApiApp() {
                     item.oneCategoryName ||
                     item.categoryName,
                   60
-                ) || 'CJ Dropshipping';
+                ) || 'Featured Collection';
               const inv = Number(item.warehouseInventoryNum ?? item.listedNum);
               const stock = Number.isFinite(inv) && inv > 0 ? Math.round(inv) : 120;
 
@@ -882,14 +902,15 @@ export function createApiApp() {
                 title,
                 titleTh: title,
                 category: cat,
-                description: `Live CJ Dropshipping ($${usdPrice.toFixed(2)} USD · 1 USD = ฿${usdToThbRate.toFixed(2)}) with +30% retail pricing.`,
-                descriptionTh: `สินค้าจริงจาก CJ Dropshipping ($${usdPrice.toFixed(2)} USD ≈ ฿${wholesaleThb.toLocaleString('th-TH')}) บวกกำไร +30%`,
+                description: `Curated ${cat} selection · Verified quality and direct fulfillment.`,
+                descriptionTh: `สินค้าคัดสรรหมวด ${cat} · พร้อมจัดส่งตรงถึงหน้าบ้าน`,
                 imageUrl: firstImg,
+                wholesaleUsd: Number(usdPrice.toFixed(2)),
                 wholesaleCost: wholesaleThb,
                 retailPrice: retailThb,
                 commissionPoolRate: 0.225,
                 stock,
-                warehouse: 'CJ-GLOBAL',
+                warehouse: 'GLOBAL-HUB',
                 weightGrams: Number(item.productWeight) || 500,
                 active: true,
               };
@@ -903,7 +924,7 @@ export function createApiApp() {
             res.json({
               source: 'live_api',
               usdToThbRate,
-              markupPercent: 30,
+              markupPercent: cjMarkupPercent,
               products: filteredLive,
             });
             return;
@@ -924,13 +945,14 @@ export function createApiApp() {
       return matchesQuery && matchesCat;
     }).map((item) => ({
       ...item,
-      retailPrice: Math.round(item.wholesaleCost * 1.3),
+      wholesaleUsd: Number((item.wholesaleCost / usdToThbRate).toFixed(2)),
+      retailPrice: Math.round(item.wholesaleCost * (1 + cjMarkupPercent / 100)),
     }));
 
     res.json({
       source: cjSessionState.mode,
       usdToThbRate,
-      markupPercent: 30,
+      markupPercent: cjMarkupPercent,
       products: filtered,
     });
   });

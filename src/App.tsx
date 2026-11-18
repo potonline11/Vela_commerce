@@ -63,8 +63,8 @@ function AppShell() {
 
   const [products, setProducts] = useState<ProductItem[]>(CURATED_CJ_CATALOG);
   const [loadingProducts, setLoadingProducts] = useState(true);
-  const [cjSource, setCjSource] = useState<string>('catalog_sync');
   const [usdToThbRate, setUsdToThbRate] = useState<number>(34.5);
+  const [markupPercent, setMarkupPercent] = useState<number>(80);
   const [memberListings, setMemberListings] = useState<MemberListingRecord[]>([]);
   const [auctions, setAuctions] = useState<AuctionRecord[]>([]);
 
@@ -119,15 +119,15 @@ function AppShell() {
       const res = await fetch(url);
       if (!res.ok) return;
       const data = (await res.json()) as {
-        source?: string;
         usdToThbRate?: number;
+        markupPercent?: number;
         products?: ProductItem[];
       };
-      if (data.source) {
-        setCjSource(data.source);
-      }
       if (typeof data.usdToThbRate === 'number' && Number.isFinite(data.usdToThbRate)) {
         setUsdToThbRate(data.usdToThbRate);
+      }
+      if (typeof data.markupPercent === 'number' && Number.isFinite(data.markupPercent)) {
+        setMarkupPercent(data.markupPercent);
       }
       if (Array.isArray(data.products)) {
         if (data.products.length > 0 || cleanQ) {
@@ -665,6 +665,8 @@ function AppShell() {
             memberListings={memberListings}
             auctions={auctions}
             products={products}
+            usdToThbRate={usdToThbRate}
+            markupPercent={markupPercent}
             securityLogs={securityLogs}
             onRefreshCatalog={loadCatalog}
           />
@@ -675,8 +677,6 @@ function AppShell() {
                 lang={lang}
                 products={products}
                 loadingProducts={loadingProducts}
-                cjSource={cjSource}
-                usdToThbRate={usdToThbRate}
                 onSearchCatalog={loadCatalog}
                 onAddToCart={handleAddToCart}
                 onNavigateDashboard={() => navigateMemberTab('dashboard')}
