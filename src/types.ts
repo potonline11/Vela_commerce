@@ -1,5 +1,7 @@
 export type MemberRank = 'Bronze' | 'Silver' | 'Gold' | 'Platinum' | 'Diamond';
 export type PaymentMethod = 'promptpay' | 'card' | 'wallet';
+export type ItemCondition = 'new' | 'like_new' | 'used';
+export type OrderSource = 'cj_dropship' | 'member_marketplace' | 'auction_win';
 export type FulfillmentStatus =
   | 'queued'
   | 'synced_cj'
@@ -26,6 +28,57 @@ export interface ProductItem {
   active: boolean;
 }
 
+export interface MemberListingRecord {
+  id: string;
+  sellerUid: string;
+  sellerName: string;
+  title: string;
+  description: string;
+  category: string;
+  condition: ItemCondition;
+  imageUrl: string;
+  price: number;
+  stock: number;
+  platformFeeRate: number;
+  lastOrderId?: string;
+  status: 'active' | 'sold_out' | 'archived';
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+export interface AuctionRecord {
+  id: string;
+  sellerUid: string;
+  sellerName: string;
+  title: string;
+  description: string;
+  category: string;
+  condition: ItemCondition;
+  imageUrl: string;
+  startingPrice: number;
+  minBidIncrement: number;
+  currentBid: number;
+  bidCount: number;
+  highestBidderUid?: string;
+  highestBidderName?: string;
+  lastBidId?: string;
+  winningOrderId?: string;
+  platformFeeRate: number;
+  endsAt?: unknown;
+  status: 'live' | 'ended_pending_payment' | 'settled' | 'cancelled';
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+export interface AuctionBidRecord {
+  id: string;
+  auctionId: string;
+  bidderUid: string;
+  bidderName: string;
+  amount: number;
+  createdAt?: unknown;
+}
+
 export interface MemberProfile {
   uid: string;
   displayName: string;
@@ -38,6 +91,7 @@ export interface MemberProfile {
   totalCommissionEarned: number;
   walletBalance: number;
   lastCommissionId?: string;
+  lastOrderId?: string;
   status: 'active' | 'suspended';
   createdAt?: unknown;
   updatedAt?: unknown;
@@ -55,6 +109,9 @@ export interface MemberPrivateInfo {
 export interface OrderRecord {
   id: string;
   orderNumber: string;
+  orderSource?: OrderSource;
+  listingId?: string;
+  auctionId?: string;
   buyerUid: string;
   sellerUid: string;
   itemSku: string;
@@ -63,6 +120,8 @@ export interface OrderRecord {
   unitPrice: number;
   totalAmount: number;
   wholesaleCost: number;
+  platformFeeAmount?: number;
+  sellerNetAmount?: number;
   paymentIntentId: string;
   paymentMethod: PaymentMethod;
   paymentSignature: string;
@@ -140,6 +199,17 @@ export interface CartItem {
   product: ProductItem;
   quantity: number;
 }
+
+export type DirectCheckoutTarget =
+  | {
+      kind: 'marketplace';
+      listing: MemberListingRecord;
+      quantity: number;
+    }
+  | {
+      kind: 'auction';
+      auction: AuctionRecord;
+    };
 
 export interface CjStatusResponse {
   connected: boolean;

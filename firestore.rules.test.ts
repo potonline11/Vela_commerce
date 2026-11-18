@@ -1,5 +1,5 @@
 /**
- * Payload-First Security Rule Verification Suite ("Dirty Dozen")
+ * Payload-First Security Rule Verification Suite ("Dirty Dozen" + Marketplace & Auction)
  * Validates structural invariants against firestore.rules expectations.
  */
 import assert from 'node:assert/strict';
@@ -13,13 +13,19 @@ assert.ok(rulesSource.includes('allow read, write: if false;'), 'Must include de
 assert.ok(rulesSource.includes('request.auth.token.email_verified == true'), 'Must require verified email');
 assert.ok(rulesSource.includes('isValidId('), 'Must enforce isValidId on document IDs');
 assert.ok(rulesSource.includes('isValidMember('), 'Must enforce isValidMember blueprint');
+assert.ok(rulesSource.includes('isValidMemberListing('), 'Must enforce isValidMemberListing blueprint');
+assert.ok(rulesSource.includes('isValidAuction('), 'Must enforce isValidAuction blueprint');
+assert.ok(rulesSource.includes('isValidAuctionBid('), 'Must enforce isValidAuctionBid blueprint');
 assert.ok(rulesSource.includes('isValidOrder('), 'Must enforce isValidOrder blueprint');
 assert.ok(rulesSource.includes('isValidCommission('), 'Must enforce isValidCommission blueprint');
 assert.ok(rulesSource.includes('isValidPaymentIntent('), 'Must enforce isValidPaymentIntent blueprint');
+assert.ok(rulesSource.includes('data.platformFeeRate == 0.05'), 'Must lock 5% platform fee rate');
+assert.ok(rulesSource.includes('existing().sellerUid != request.auth.uid'), 'Must prevent self-bidding / self-buying');
 assert.ok(rulesSource.includes('getAfter(/databases/$(database)/documents/commissions/'), 'Must enforce atomic commission credit via getAfter');
+assert.ok(rulesSource.includes('getAfter(/databases/$(database)/documents/auctions/$(auctionId)/bids/'), 'Must enforce atomic bid ledger sync via getAfter');
 assert.ok(rulesSource.includes('existsAfter(/databases/$(database)/documents/orders/'), 'Must enforce atomic order existence via existsAfter');
 assert.ok(!/allow\s+read\s*:\s*if\s+true/.test(rulesSource), 'No open read allowed');
 assert.ok(!/allow\s+write\s*:\s*if\s+true/.test(rulesSource), 'No open write allowed');
-assert.ok(rulesSource.includes('allow update, delete: if false;'), 'Security logs must be immutable');
+assert.ok(rulesSource.includes('allow update, delete: if false;'), 'Security logs and auction bids must be immutable');
 
-console.log('All 13 static Red Team security assertions passed.');
+console.log('All 19 static Red Team security assertions passed.');

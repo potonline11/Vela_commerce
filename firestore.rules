@@ -60,7 +60,7 @@ service cloud.firestore {
           'uid', 'displayName', 'referralCode', 'sponsorUid', 'rank',
           'personalVolume', 'teamVolume', 'directCount',
           'totalCommissionEarned', 'walletBalance', 'lastCommissionId',
-          'status', 'createdAt', 'updatedAt'
+          'lastOrderId', 'status', 'createdAt', 'updatedAt'
         ]) &&
         isValidId(data.uid) &&
         data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80 &&
@@ -68,6 +68,7 @@ service cloud.firestore {
         data.referralCode.matches('^[A-Z0-9_\\-]+$') &&
         (!('sponsorUid' in data) || (data.sponsorUid is string && data.sponsorUid.size() <= 128)) &&
         (!('lastCommissionId' in data) || (data.lastCommissionId is string && data.lastCommissionId.size() <= 128)) &&
+        (!('lastOrderId' in data) || (data.lastOrderId is string && data.lastOrderId.size() <= 128)) &&
         data.rank in ['Bronze', 'Silver', 'Gold', 'Platinum', 'Diamond'] &&
         data.personalVolume is number && data.personalVolume >= 0 &&
         data.teamVolume is number && data.teamVolume >= 0 &&
@@ -118,6 +119,79 @@ service cloud.firestore {
         data.updatedAt is timestamp;
     }
 
+    function isValidMemberListing(data) {
+      return data.keys().hasAll([
+          'sellerUid', 'sellerName', 'title', 'description', 'category',
+          'condition', 'imageUrl', 'price', 'stock', 'platformFeeRate',
+          'status', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'sellerUid', 'sellerName', 'title', 'description', 'category',
+          'condition', 'imageUrl', 'price', 'stock', 'platformFeeRate',
+          'lastOrderId', 'status', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.sellerUid) &&
+        data.sellerName is string && data.sellerName.size() >= 1 && data.sellerName.size() <= 80 &&
+        data.title is string && data.title.size() >= 2 && data.title.size() <= 140 &&
+        data.description is string && data.description.size() >= 4 && data.description.size() <= 800 &&
+        data.category is string && data.category.size() >= 2 && data.category.size() <= 60 &&
+        data.condition in ['new', 'like_new', 'used'] &&
+        data.imageUrl is string && data.imageUrl.size() >= 5 && data.imageUrl.size() <= 500 &&
+        data.price is number && data.price >= 10 && data.price <= 10000000 &&
+        data.stock is int && data.stock >= 0 && data.stock <= 10000 &&
+        data.platformFeeRate is number && data.platformFeeRate == 0.05 &&
+        (!('lastOrderId' in data) || (data.lastOrderId is string && data.lastOrderId.size() <= 128)) &&
+        data.status in ['active', 'sold_out', 'archived'] &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidAuction(data) {
+      return data.keys().hasAll([
+          'sellerUid', 'sellerName', 'title', 'description', 'category',
+          'condition', 'imageUrl', 'startingPrice', 'minBidIncrement',
+          'currentBid', 'bidCount', 'platformFeeRate', 'endsAt',
+          'status', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'sellerUid', 'sellerName', 'title', 'description', 'category',
+          'condition', 'imageUrl', 'startingPrice', 'minBidIncrement',
+          'currentBid', 'bidCount', 'highestBidderUid', 'highestBidderName',
+          'lastBidId', 'winningOrderId', 'platformFeeRate', 'endsAt',
+          'status', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.sellerUid) &&
+        data.sellerName is string && data.sellerName.size() >= 1 && data.sellerName.size() <= 80 &&
+        data.title is string && data.title.size() >= 2 && data.title.size() <= 140 &&
+        data.description is string && data.description.size() >= 4 && data.description.size() <= 800 &&
+        data.category is string && data.category.size() >= 2 && data.category.size() <= 60 &&
+        data.condition in ['new', 'like_new', 'used'] &&
+        data.imageUrl is string && data.imageUrl.size() >= 5 && data.imageUrl.size() <= 500 &&
+        data.startingPrice is number && data.startingPrice >= 10 && data.startingPrice <= 10000000 &&
+        data.minBidIncrement is number && data.minBidIncrement >= 10 && data.minBidIncrement <= 1000000 &&
+        data.currentBid is number && data.currentBid >= data.startingPrice &&
+        data.bidCount is int && data.bidCount >= 0 &&
+        (!('highestBidderUid' in data) || (isValidId(data.highestBidderUid))) &&
+        (!('highestBidderName' in data) || (data.highestBidderName is string && data.highestBidderName.size() <= 80)) &&
+        (!('lastBidId' in data) || (data.lastBidId is string && data.lastBidId.size() <= 128)) &&
+        (!('winningOrderId' in data) || (data.winningOrderId is string && data.winningOrderId.size() <= 128)) &&
+        data.platformFeeRate is number && data.platformFeeRate == 0.05 &&
+        data.endsAt is timestamp &&
+        data.status in ['live', 'ended_pending_payment', 'settled', 'cancelled'] &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidAuctionBid(data) {
+      return data.keys().hasAll(['auctionId', 'bidderUid', 'bidderName', 'amount', 'createdAt']) &&
+        data.keys().hasOnly(['auctionId', 'bidderUid', 'bidderName', 'amount', 'createdAt']) &&
+        isValidId(data.auctionId) &&
+        isValidId(data.bidderUid) &&
+        data.bidderName is string && data.bidderName.size() >= 1 && data.bidderName.size() <= 80 &&
+        data.amount is number && data.amount >= 10 && data.amount <= 10000000 &&
+        data.createdAt is timestamp;
+    }
+
     function isValidOrder(data) {
       return data.keys().hasAll([
           'orderNumber', 'buyerUid', 'sellerUid', 'itemSku', 'itemTitle',
@@ -127,14 +201,19 @@ service cloud.firestore {
           'createdAt', 'updatedAt'
         ]) &&
         data.keys().hasOnly([
-          'orderNumber', 'buyerUid', 'sellerUid', 'itemSku', 'itemTitle',
+          'orderNumber', 'orderSource', 'listingId', 'auctionId',
+          'buyerUid', 'sellerUid', 'itemSku', 'itemTitle',
           'quantity', 'unitPrice', 'totalAmount', 'wholesaleCost',
+          'platformFeeAmount', 'sellerNetAmount',
           'paymentIntentId', 'paymentMethod', 'paymentSignature',
           'paymentStatus', 'cjOrderId', 'fulfillmentStatus',
           'trackingNumber', 'carrierName', 'shippingCity',
           'createdAt', 'updatedAt'
         ]) &&
         data.orderNumber is string && data.orderNumber.size() >= 4 && data.orderNumber.size() <= 40 &&
+        (!('orderSource' in data) || data.orderSource in ['cj_dropship', 'member_marketplace', 'auction_win']) &&
+        (!('listingId' in data) || (data.listingId is string && data.listingId.size() <= 128)) &&
+        (!('auctionId' in data) || (data.auctionId is string && data.auctionId.size() <= 128)) &&
         isValidId(data.buyerUid) &&
         isValidId(data.sellerUid) &&
         data.itemSku is string && data.itemSku.size() >= 2 && data.itemSku.size() <= 64 &&
@@ -143,6 +222,8 @@ service cloud.firestore {
         data.unitPrice is number && data.unitPrice > 0 &&
         data.totalAmount is number && data.totalAmount > 0 &&
         data.wholesaleCost is number && data.wholesaleCost >= 0 &&
+        (!('platformFeeAmount' in data) || (data.platformFeeAmount is number && data.platformFeeAmount >= 0)) &&
+        (!('sellerNetAmount' in data) || (data.sellerNetAmount is number && data.sellerNetAmount >= 0)) &&
         data.paymentIntentId is string && data.paymentIntentId.size() >= 4 && data.paymentIntentId.size() <= 128 &&
         data.paymentMethod in ['promptpay', 'card', 'wallet'] &&
         data.paymentSignature is string && data.paymentSignature.size() >= 16 && data.paymentSignature.size() <= 128 &&
@@ -313,6 +394,20 @@ service cloud.firestore {
             getAfter(/databases/$(database)/documents/commissions/$(incoming().lastCommissionId)).data.beneficiaryUid == memberId &&
             getAfter(/databases/$(database)/documents/commissions/$(incoming().lastCommissionId)).data.sourceBuyerUid == request.auth.uid &&
             (incoming().walletBalance - existing().walletBalance) == getAfter(/databases/$(database)/documents/commissions/$(incoming().lastCommissionId)).data.commissionAmount
+          ) ||
+          // Action: Atomic 95% seller proceeds credit backed by a co-created paid Marketplace or Auction order
+          (incoming().diff(existing()).affectedKeys().hasOnly([
+              'walletBalance', 'lastOrderId', 'updatedAt'
+            ]) &&
+            'lastOrderId' in incoming() &&
+            incoming().lastOrderId is string &&
+            isValidId(incoming().lastOrderId) &&
+            incoming().walletBalance >= existing().walletBalance &&
+            getAfter(/databases/$(database)/documents/orders/$(incoming().lastOrderId)).data.sellerUid == memberId &&
+            getAfter(/databases/$(database)/documents/orders/$(incoming().lastOrderId)).data.buyerUid == request.auth.uid &&
+            getAfter(/databases/$(database)/documents/orders/$(incoming().lastOrderId)).data.paymentStatus == 'paid' &&
+            getAfter(/databases/$(database)/documents/orders/$(incoming().lastOrderId)).data.orderSource in ['member_marketplace', 'auction_win'] &&
+            (incoming().walletBalance - existing().walletBalance) == getAfter(/databases/$(database)/documents/orders/$(incoming().lastOrderId)).data.sellerNetAmount
           )
         );
 
@@ -343,6 +438,136 @@ service cloud.firestore {
       allow delete: if isAdmin() && isValidId(productId);
     }
 
+    match /memberListings/{listingId} {
+      allow get: if isValidId(listingId) && (
+        resource.data.status == 'active' ||
+        (isSignedIn() && resource.data.sellerUid == request.auth.uid) ||
+        isAdmin()
+      );
+      allow list: if resource.data.status == 'active' ||
+        (isSignedIn() && resource.data.sellerUid == request.auth.uid) ||
+        isAdmin();
+      allow create: if isVerified() && isValidId(listingId) &&
+        isValidMemberListing(incoming()) &&
+        incoming().sellerUid == request.auth.uid &&
+        incoming().platformFeeRate == 0.05 &&
+        incoming().status == 'active' &&
+        incoming().stock >= 1 &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isVerified() && isValidId(listingId) &&
+        isValidMemberListing(incoming()) &&
+        incoming().sellerUid == existing().sellerUid &&
+        incoming().platformFeeRate == 0.05 &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          // Action: Seller updates own active/sold_out listing
+          (isOwner(existing().sellerUid) &&
+            existing().status != 'archived' &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'title', 'description', 'category', 'condition', 'imageUrl', 'price', 'stock', 'status', 'updatedAt'
+            ])) ||
+          // Action: Buyer atomic stock decrement backed by paid marketplace order
+          (existing().status == 'active' &&
+            existing().sellerUid != request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['stock', 'status', 'lastOrderId', 'updatedAt']) &&
+            incoming().stock < existing().stock &&
+            incoming().stock >= 0 &&
+            ((incoming().stock == 0 && incoming().status == 'sold_out') || (incoming().stock > 0 && incoming().status == 'active')) &&
+            'lastOrderId' in incoming() &&
+            isValidId(incoming().lastOrderId) &&
+            getAfter(/databases/$(database)/documents/orders/$(incoming().lastOrderId)).data.listingId == listingId &&
+            getAfter(/databases/$(database)/documents/orders/$(incoming().lastOrderId)).data.buyerUid == request.auth.uid &&
+            getAfter(/databases/$(database)/documents/orders/$(incoming().lastOrderId)).data.paymentStatus == 'paid')
+        );
+      allow delete: if isAdmin() && isValidId(listingId);
+    }
+
+    match /auctions/{auctionId} {
+      allow get: if isValidId(auctionId) && (
+        resource.data.status in ['live', 'ended_pending_payment', 'settled'] ||
+        (isSignedIn() && resource.data.sellerUid == request.auth.uid) ||
+        isAdmin()
+      );
+      allow list: if resource.data.status in ['live', 'ended_pending_payment', 'settled'] ||
+        (isSignedIn() && resource.data.sellerUid == request.auth.uid) ||
+        isAdmin();
+      allow create: if isVerified() && isValidId(auctionId) &&
+        isValidAuction(incoming()) &&
+        incoming().sellerUid == request.auth.uid &&
+        incoming().platformFeeRate == 0.05 &&
+        incoming().status == 'live' &&
+        incoming().bidCount == 0 &&
+        incoming().currentBid == incoming().startingPrice &&
+        !('highestBidderUid' in incoming()) &&
+        incoming().endsAt > request.time &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isVerified() && isValidId(auctionId) &&
+        isValidAuction(incoming()) &&
+        incoming().sellerUid == existing().sellerUid &&
+        incoming().startingPrice == existing().startingPrice &&
+        incoming().minBidIncrement == existing().minBidIncrement &&
+        incoming().platformFeeRate == 0.05 &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          // Action 1: Verified bidder places atomic higher bid backed by /bids/{lastBidId}
+          (existing().status == 'live' &&
+            request.time < existing().endsAt &&
+            existing().sellerUid != request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'currentBid', 'bidCount', 'highestBidderUid', 'highestBidderName', 'lastBidId', 'updatedAt'
+            ]) &&
+            incoming().bidCount == existing().bidCount + 1 &&
+            incoming().highestBidderUid == request.auth.uid &&
+            'lastBidId' in incoming() &&
+            isValidId(incoming().lastBidId) &&
+            ((existing().bidCount == 0 && incoming().currentBid >= existing().startingPrice) ||
+             (existing().bidCount > 0 && incoming().currentBid >= existing().currentBid + existing().minBidIncrement)) &&
+            getAfter(/databases/$(database)/documents/auctions/$(auctionId)/bids/$(incoming().lastBidId)).data.bidderUid == request.auth.uid &&
+            getAfter(/databases/$(database)/documents/auctions/$(auctionId)/bids/$(incoming().lastBidId)).data.amount == incoming().currentBid
+          ) ||
+          // Action 2: Close auction once timer expires or seller closes early
+          (existing().status == 'live' &&
+            (request.time >= existing().endsAt || existing().sellerUid == request.auth.uid) &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']) &&
+            ((existing().bidCount > 0 && incoming().status == 'ended_pending_payment') ||
+             (existing().bidCount == 0 && incoming().status == 'cancelled'))
+          ) ||
+          // Action 3: Highest bidder settles winning bid atomically with paid auction order
+          ((existing().status == 'ended_pending_payment' || (existing().status == 'live' && request.time >= existing().endsAt)) &&
+            existing().bidCount > 0 &&
+            existing().highestBidderUid == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'winningOrderId', 'updatedAt']) &&
+            incoming().status == 'settled' &&
+            'winningOrderId' in incoming() &&
+            isValidId(incoming().winningOrderId) &&
+            getAfter(/databases/$(database)/documents/orders/$(incoming().winningOrderId)).data.auctionId == auctionId &&
+            getAfter(/databases/$(database)/documents/orders/$(incoming().winningOrderId)).data.buyerUid == request.auth.uid &&
+            getAfter(/databases/$(database)/documents/orders/$(incoming().winningOrderId)).data.paymentStatus == 'paid'
+          )
+        );
+      allow delete: if isAdmin() && isValidId(auctionId);
+
+      match /bids/{bidId} {
+        allow get: if isSignedIn() && isValidId(auctionId) && isValidId(bidId) &&
+          resource.data.auctionId == auctionId;
+        allow list: if isSignedIn() && resource.data.auctionId == auctionId;
+        allow create: if isVerified() && isValidId(auctionId) && isValidId(bidId) &&
+          isValidAuctionBid(incoming()) &&
+          incoming().auctionId == auctionId &&
+          incoming().bidderUid == request.auth.uid &&
+          incoming().createdAt == request.time &&
+          get(/databases/$(database)/documents/auctions/$(auctionId)).data.status == 'live' &&
+          get(/databases/$(database)/documents/auctions/$(auctionId)).data.endsAt > request.time &&
+          get(/databases/$(database)/documents/auctions/$(auctionId)).data.sellerUid != request.auth.uid &&
+          getAfter(/databases/$(database)/documents/auctions/$(auctionId)).data.lastBidId == bidId;
+        allow update, delete: if false;
+      }
+    }
+
     match /orders/{orderId} {
       allow get: if isSignedIn() && isValidId(orderId) && (
         resource.data.buyerUid == request.auth.uid ||
@@ -358,7 +583,38 @@ service cloud.firestore {
         isValidOrder(incoming()) &&
         incoming().buyerUid == request.auth.uid &&
         incoming().createdAt == request.time &&
-        incoming().updatedAt == request.time;
+        incoming().updatedAt == request.time && (
+          !('orderSource' in incoming()) ||
+          incoming().orderSource == 'cj_dropship' ||
+          (incoming().orderSource == 'member_marketplace' &&
+            'listingId' in incoming() &&
+            isValidId(incoming().listingId) &&
+            incoming().sellerUid == get(/databases/$(database)/documents/memberListings/$(incoming().listingId)).data.sellerUid &&
+            incoming().sellerUid != request.auth.uid &&
+            incoming().unitPrice == get(/databases/$(database)/documents/memberListings/$(incoming().listingId)).data.price &&
+            incoming().totalAmount >= incoming().unitPrice * incoming().quantity * 0.999 &&
+            incoming().totalAmount <= incoming().unitPrice * incoming().quantity * 1.001 &&
+            'platformFeeAmount' in incoming() &&
+            'sellerNetAmount' in incoming() &&
+            incoming().platformFeeAmount >= incoming().totalAmount * 0.049 &&
+            incoming().platformFeeAmount <= incoming().totalAmount * 0.051 &&
+            (incoming().platformFeeAmount + incoming().sellerNetAmount) >= incoming().totalAmount * 0.999 &&
+            (incoming().platformFeeAmount + incoming().sellerNetAmount) <= incoming().totalAmount * 1.001) ||
+          (incoming().orderSource == 'auction_win' &&
+            'auctionId' in incoming() &&
+            isValidId(incoming().auctionId) &&
+            incoming().sellerUid == get(/databases/$(database)/documents/auctions/$(incoming().auctionId)).data.sellerUid &&
+            incoming().sellerUid != request.auth.uid &&
+            incoming().quantity == 1 &&
+            incoming().totalAmount == get(/databases/$(database)/documents/auctions/$(incoming().auctionId)).data.currentBid &&
+            get(/databases/$(database)/documents/auctions/$(incoming().auctionId)).data.highestBidderUid == request.auth.uid &&
+            'platformFeeAmount' in incoming() &&
+            'sellerNetAmount' in incoming() &&
+            incoming().platformFeeAmount >= incoming().totalAmount * 0.049 &&
+            incoming().platformFeeAmount <= incoming().totalAmount * 0.051 &&
+            (incoming().platformFeeAmount + incoming().sellerNetAmount) >= incoming().totalAmount * 0.999 &&
+            (incoming().platformFeeAmount + incoming().sellerNetAmount) <= incoming().totalAmount * 1.001)
+        );
       allow update: if isVerified() && isValidId(orderId) &&
         isValidOrder(incoming()) &&
         incoming().buyerUid == existing().buyerUid &&
@@ -375,7 +631,8 @@ service cloud.firestore {
       match /shipping/{docId} {
         allow get: if isVerified() && isValidId(orderId) && isValidId(docId) && (
           isAdmin() ||
-          get(/databases/$(database)/documents/orders/$(orderId)).data.buyerUid == request.auth.uid
+          get(/databases/$(database)/documents/orders/$(orderId)).data.buyerUid == request.auth.uid ||
+          get(/databases/$(database)/documents/orders/$(orderId)).data.sellerUid == request.auth.uid
         );
         allow list: if isVerified() && (
           resource.data.buyerUid == request.auth.uid ||

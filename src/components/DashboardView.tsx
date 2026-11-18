@@ -9,7 +9,6 @@ import type {
   MemberProfile,
   OrderRecord,
   PayoutRequestRecord,
-  SecurityLogRecord,
 } from '../types';
 
 interface DashboardViewProps {
@@ -19,7 +18,6 @@ interface DashboardViewProps {
   orders: OrderRecord[];
   commissions: CommissionRecord[];
   payouts: PayoutRequestRecord[];
-  securityLogs: SecurityLogRecord[];
   onSignIn: () => Promise<void>;
 }
 
@@ -30,7 +28,6 @@ export function DashboardView({
   orders,
   commissions,
   payouts,
-  securityLogs,
   onSignIn,
 }: DashboardViewProps) {
   const t = COPY[lang];
@@ -300,14 +297,16 @@ export function DashboardView({
         )}
       </div>
 
-      {/* Payment Gateway HMAC Verification & Security Audit */}
+      {/* Member Order Payment Receipt Verification */}
       <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
         <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <ShieldCheck className="w-4 h-4 text-emerald-700" />
-            <h2 className="text-base font-semibold text-slate-900">{t.securityAuditTitle}</h2>
+            <h2 className="text-base font-semibold text-slate-900">
+              {lang === 'th' ? 'ตรวจสอบใบเสร็จและลายเซ็นชำระเงินของฉัน' : 'My Order Payment Receipt Verifier'}
+            </h2>
           </div>
-          <span className="text-xs text-slate-500 tabular-nums">{securityLogs.length} audit events</span>
+          <span className="text-xs text-slate-500 tabular-nums">{orders.length} orders</span>
         </div>
 
         <div className="divide-y divide-slate-100">

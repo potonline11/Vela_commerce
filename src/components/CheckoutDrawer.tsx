@@ -14,10 +14,20 @@ import {
 import type { User } from 'firebase/auth';
 import type { Lang } from '../i18n';
 import { COPY } from '../i18n';
-import { commitAtomicCheckout } from '../services/commerceService';
-import type { CartItem, MemberPrivateInfo, MemberProfile } from '../types';
+import {
+  calculatePlatformFee,
+  commitAtomicCheckout,
+  commitMarketplaceOrAuctionCheckout,
+} from '../services/commerceService';
+import type {
+  CartItem,
+  DirectCheckoutTarget,
+  MemberPrivateInfo,
+  MemberProfile,
+} from '../types';
 
 export interface PendingVelaCheckout {
+  checkoutType: 'cj_cart' | 'marketplace' | 'auction';
   orderId: string;
   orderNumber: string;
   intentId: string;
@@ -25,6 +35,7 @@ export interface PendingVelaCheckout {
   idempotencyKey: string;
   amount: number;
   cart: CartItem[];
+  directTarget?: DirectCheckoutTarget | null;
   sponsorReferralCode: string;
   shipping: {
     recipientName: string;
@@ -42,6 +53,8 @@ export interface CheckoutReceiptData {
   trackingNumber: string;
   receiptHash: string;
   intentId?: string;
+  platformFeeAmount?: number;
+  sellerNetAmount?: number;
   commissionsDistributed: Array<{ tier: number; beneficiaryName: string; amount: number }>;
 }
 
@@ -54,6 +67,9 @@ interface CheckoutDrawerProps {
   privateInfo: MemberPrivateInfo | null;
   allMembers: MemberProfile[];
   cart: CartItem[];
+  directTarget: DirectCheckoutTarget | null;
+  onUpdateDirectQty: (delta: number) => void;
+  onClearDirectTarget: () => void;
   onUpdateQty: (sku: string, delta: number) => void;
   onRemoveItem: (sku: string) => void;
   onClearCart: () => void;
@@ -74,6 +90,9 @@ export function CheckoutDrawer({
   privateInfo,
   allMembers,
   cart,
+  directTarget,
+  onUpdateDirectQty,
+  onClearDirectTarget,
   onUpdateQty,
   onRemoveItem,
   onClearCart,
@@ -103,7 +122,16 @@ export function CheckoutDrawer({
   if (!open) return null;
 
   const activeReceipt = externalReceipt || localReceipt;
-  const subtotal = cart.reduce((sum, item) => sum + item.product.retailPrice * item.quantity, 0);
+  const isDirectMode = Boolean(directTarget);
+
+  const subtotal = directTarget
+    ? directTarget.kind === 'marketplace'
+      ? Number((directTarget.listing.price * directTarget.quantity).toFixed(2))
+      : directTarget.auction.currentBid
+    : cart.reduce((sum, item) => sum + item.product.retailPrice * item.quantity, 0);
+
+  const feePreview = directTarget ? calculatePlatformFee(subtotal) : null;
+
   const formatThb = (val: number) =>
     new Intl.NumberFormat('th-TH', {
       style: 'currency',
@@ -111,9 +139,11 @@ export function CheckoutDrawer({
       maximumFractionDigits: 0,
     }).format(val);
 
+  const hasItemsToCheckout = isDirectMode || cart.length > 0;
+
   const handleCheckoutSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!user || !profile || cart.length === 0) return;
+    if (!user || !profile || !hasItemsToCheckout) return;
     setErrorMsg('');
     setBusy(true);
 
@@ -156,42 +186,109 @@ export function CheckoutDrawer({
           throw new Error(walletData.error || 'Wallet settlement failed');
         }
 
-        const result = await commitAtomicCheckout({
-          user,
-          buyerProfile: profile,
-          allMembers,
-          cart,
-          paymentMethod: 'wallet',
-          intentCode: walletData.intentCode,
-          hmacSignature: walletData.hmacSignature,
-          receiptHash: walletData.receiptHash,
-          maskedSource: walletData.maskedSource,
-          idempotencyKey,
-          sponsorReferralCode: sponsorCode,
-          shipping: shippingPayload,
-        });
-
-        setLocalReceipt({
-          ...result,
-          receiptHash: walletData.receiptHash,
-          intentId: walletData.intentCode,
-        });
-        onClearCart();
+        if (directTarget) {
+          const result = await commitMarketplaceOrAuctionCheckout({
+            mode: directTarget.kind,
+            user,
+            buyerProfile: profile,
+            sellerUid:
+              directTarget.kind === 'marketplace'
+                ? directTarget.listing.sellerUid
+                : directTarget.auction.sellerUid,
+            listing: directTarget.kind === 'marketplace' ? directTarget.listing : undefined,
+            auction: directTarget.kind === 'auction' ? directTarget.auction : undefined,
+            quantity: directTarget.kind === 'marketplace' ? directTarget.quantity : 1,
+            unitPrice:
+              directTarget.kind === 'marketplace'
+                ? directTarget.listing.price
+                : directTarget.auction.currentBid,
+            itemTitle:
+              directTarget.kind === 'marketplace'
+                ? directTarget.listing.title
+                : directTarget.auction.title,
+            itemSku:
+              directTarget.kind === 'marketplace'
+                ? `MKT-${directTarget.listing.id.slice(-6).toUpperCase()}`
+                : `AUC-${directTarget.auction.id.slice(-6).toUpperCase()}`,
+            paymentMethod: 'wallet',
+            intentCode: walletData.intentCode,
+            hmacSignature: walletData.hmacSignature,
+            receiptHash: walletData.receiptHash,
+            maskedSource: walletData.maskedSource,
+            idempotencyKey,
+            shipping: shippingPayload,
+          });
+          setLocalReceipt({
+            ...result,
+            receiptHash: walletData.receiptHash,
+            intentId: walletData.intentCode,
+          });
+          onClearDirectTarget();
+        } else {
+          const result = await commitAtomicCheckout({
+            user,
+            buyerProfile: profile,
+            allMembers,
+            cart,
+            paymentMethod: 'wallet',
+            intentCode: walletData.intentCode,
+            hmacSignature: walletData.hmacSignature,
+            receiptHash: walletData.receiptHash,
+            maskedSource: walletData.maskedSource,
+            idempotencyKey,
+            sponsorReferralCode: sponsorCode,
+            shipping: shippingPayload,
+          });
+          setLocalReceipt({
+            ...result,
+            receiptHash: walletData.receiptHash,
+            intentId: walletData.intentCode,
+          });
+          onClearCart();
+        }
         return;
       }
 
       // Live VelaPayment Checkout Session Flow (https://velapayment.vercel.app)
       const orderId = `ord_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-      const orderNumber = `ORD-${Date.now().toString().slice(-6)}-${Math.floor(100 + Math.random() * 899)}`;
+      const prefix =
+        directTarget?.kind === 'auction'
+          ? 'AUC'
+          : directTarget?.kind === 'marketplace'
+          ? 'MKT'
+          : 'ORD';
+      const orderNumber = `${prefix}-${Date.now().toString().slice(-6)}-${Math.floor(100 + Math.random() * 899)}`;
       const origin = window.location.origin;
       const successUrl = `${origin}/`;
       const cancelUrl = `${origin}/?payment=cancelled&orderId=${encodeURIComponent(orderId)}`;
 
-      const primaryTitle = lang === 'th' ? cart[0].product.titleTh : cart[0].product.title;
-      const description =
-        cart.length > 1
-          ? `${primaryTitle} (+${cart.length - 1} items) · ${orderNumber}`
-          : `${primaryTitle} · ${orderNumber}`;
+      let description = `Vela Commerce · ${orderNumber}`;
+      if (directTarget?.kind === 'marketplace') {
+        description = `${directTarget.listing.title} (x${directTarget.quantity}) · ${orderNumber}`;
+      } else if (directTarget?.kind === 'auction') {
+        description = `Auction Win: ${directTarget.auction.title} · ${orderNumber}`;
+      } else if (cart.length > 0) {
+        const primaryTitle = lang === 'th' ? cart[0].product.titleTh : cart[0].product.title;
+        description =
+          cart.length > 1
+            ? `${primaryTitle} (+${cart.length - 1} items) · ${orderNumber}`
+            : `${primaryTitle} · ${orderNumber}`;
+      }
+
+      const pendingSnapshot: PendingVelaCheckout = {
+        checkoutType: directTarget ? directTarget.kind : 'cj_cart',
+        orderId,
+        orderNumber,
+        intentId: '',
+        hmacSignature: '',
+        idempotencyKey,
+        amount: subtotal,
+        cart: directTarget ? [] : cart,
+        directTarget,
+        sponsorReferralCode: sponsorCode,
+        shipping: shippingPayload,
+        createdAt: Date.now(),
+      };
 
       const res = await fetch('/api/payments/checkout-sessions', {
         method: 'POST',
@@ -204,41 +301,34 @@ export function CheckoutDrawer({
           successUrl,
           cancelUrl,
           idempotencyKey,
+          pendingSnapshot,
         }),
       });
 
-      const data = await res.json();
+      const rawText = await res.text();
+      let data: { checkoutUrl?: string; intentId?: string; hmacSignature?: string; error?: string } = {};
+      try {
+        data = JSON.parse(rawText);
+      } catch {
+        throw new Error(
+          lang === 'th'
+            ? `เซิร์ฟเวอร์ตอบกลับไม่ถูกต้อง (HTTP ${res.status}): ${rawText.slice(0, 80)}`
+            : `Unexpected API response (HTTP ${res.status}): ${rawText.slice(0, 80)}`
+        );
+      }
+
       if (!res.ok || !data.checkoutUrl || !data.intentId) {
         throw new Error(data.error || 'Failed to create VelaPayment checkout session');
       }
 
-      const pendingSnapshot: PendingVelaCheckout = {
-        orderId,
-        orderNumber,
-        intentId: data.intentId,
-        hmacSignature: data.hmacSignature,
-        idempotencyKey,
-        amount: subtotal,
-        cart,
-        sponsorReferralCode: sponsorCode,
-        shipping: shippingPayload,
-        createdAt: Date.now(),
-      };
+      pendingSnapshot.intentId = data.intentId;
+      pendingSnapshot.hmacSignature = data.hmacSignature || '';
 
       localStorage.setItem(`vela_pending_checkout_${orderId}`, JSON.stringify(pendingSnapshot));
       localStorage.setItem('vela_pending_checkout_latest', JSON.stringify(pendingSnapshot));
 
       setRedirectUrl(data.checkoutUrl);
-
-      try {
-        if (window.top && window.top !== window) {
-          window.top.location.href = data.checkoutUrl;
-        } else {
-          window.location.assign(data.checkoutUrl);
-        }
-      } catch {
-        // Fallback button remains visible if cross-origin top navigation is restricted by iframe sandbox
-      }
+      window.location.assign(data.checkoutUrl);
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Checkout failed');
     } finally {
@@ -254,7 +344,17 @@ export function CheckoutDrawer({
             <div className="flex items-center gap-2.5">
               <Lock className="w-4 h-4 text-emerald-700" />
               <h2 className="text-lg font-semibold text-slate-900">
-                {lang === 'th' ? 'ชำระเงินผ่าน VelaPayment' : 'VelaPayment Checkout'}
+                {directTarget?.kind === 'auction'
+                  ? lang === 'th'
+                    ? 'ชำระเงินค่าประมูล (VelaPayment)'
+                    : 'Auction Settlement (VelaPayment)'
+                  : directTarget?.kind === 'marketplace'
+                  ? lang === 'th'
+                    ? 'ชำระเงินสินค้าสมาชิก (VelaPayment)'
+                    : 'Marketplace Checkout (VelaPayment)'
+                  : lang === 'th'
+                  ? 'ชำระเงินผ่าน VelaPayment'
+                  : 'VelaPayment Checkout'}
               </h2>
             </div>
             <button
@@ -263,6 +363,7 @@ export function CheckoutDrawer({
                 setLocalReceipt(null);
                 setRedirectUrl(null);
                 onClearExternalReceipt();
+                onClearDirectTarget();
                 onClose();
               }}
               aria-label="Close drawer"
@@ -283,8 +384,8 @@ export function CheckoutDrawer({
                 </p>
                 <p className="text-xs text-slate-500">
                   {lang === 'th'
-                    ? 'เมื่อยืนยันแล้วระบบจะส่งเข้า CJ Dropshipping และปันผลคอมมิชชั่นทันที'
-                    : 'Fulfillment and MLM commissions will settle automatically once confirmed.'}
+                    ? 'เมื่อยืนยันแล้วระบบจะปิดออเดอร์และคำนวณยอดโอนอัตโนมัติ'
+                    : 'Orders and payouts will settle automatically once confirmed.'}
                 </p>
               </div>
             </div>
@@ -293,7 +394,13 @@ export function CheckoutDrawer({
               <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-6 space-y-3">
                 <div className="flex items-center gap-2.5 text-emerald-800">
                   <CheckCircle2 className="w-5 h-5 shrink-0" />
-                  <h3 className="text-base font-semibold">{t.orderCompleteTitle}</h3>
+                  <h3 className="text-base font-semibold">
+                    {typeof activeReceipt.platformFeeAmount === 'number'
+                      ? lang === 'th'
+                        ? 'ชำระเงินสำเร็จ & โอนยอดสุทธิ 95% ให้ผู้ขายแล้ว'
+                        : 'Payment Settled · 95% Credited to Seller'
+                      : t.orderCompleteTitle}
+                  </h3>
                 </div>
                 <div className="grid grid-cols-2 gap-4 pt-2 text-xs">
                   <div>
@@ -303,15 +410,27 @@ export function CheckoutDrawer({
                     </span>
                   </div>
                   <div>
-                    <span className="text-emerald-700 block">CJ Dropshipping ID</span>
-                    <span className="font-mono font-semibold text-slate-900">
-                      {activeReceipt.cjOrderId}
+                    <span className="text-emerald-700 block">
+                      {typeof activeReceipt.platformFeeAmount === 'number'
+                        ? 'Platform Fee (5%)'
+                        : 'CJ Dropshipping ID'}
+                    </span>
+                    <span className="font-mono font-semibold text-slate-900 tabular-nums">
+                      {typeof activeReceipt.platformFeeAmount === 'number'
+                        ? formatThb(activeReceipt.platformFeeAmount)
+                        : activeReceipt.cjOrderId}
                     </span>
                   </div>
                   <div>
-                    <span className="text-emerald-700 block">Tracking Number</span>
-                    <span className="font-mono font-semibold text-slate-900">
-                      {activeReceipt.trackingNumber}
+                    <span className="text-emerald-700 block">
+                      {typeof activeReceipt.sellerNetAmount === 'number'
+                        ? 'Seller Net (95%)'
+                        : 'Tracking Number'}
+                    </span>
+                    <span className="font-mono font-semibold text-slate-900 tabular-nums">
+                      {typeof activeReceipt.sellerNetAmount === 'number'
+                        ? formatThb(activeReceipt.sellerNetAmount)
+                        : activeReceipt.trackingNumber}
                     </span>
                   </div>
                   <div>
@@ -349,6 +468,7 @@ export function CheckoutDrawer({
                   onClick={() => {
                     setLocalReceipt(null);
                     onClearExternalReceipt();
+                    onClearDirectTarget();
                     onClose();
                     onGoDropship();
                   }}
@@ -361,6 +481,7 @@ export function CheckoutDrawer({
                   onClick={() => {
                     setLocalReceipt(null);
                     onClearExternalReceipt();
+                    onClearDirectTarget();
                     onClose();
                   }}
                   className="px-4 py-2.5 text-sm font-medium text-slate-700 bg-slate-100 rounded-lg hover:bg-slate-200 transition-colors"
@@ -370,7 +491,7 @@ export function CheckoutDrawer({
               </div>
             </div>
           ) : redirectUrl ? (
-            <div className="bg-slate-50 border border-slate-200 rounded-xl p-6 space-y-4">
+            <div className="bg-slate-50 border border-slate-200 rounded-xl p-6 space-y-3">
               <h3 className="text-base font-semibold text-slate-900">
                 {lang === 'th'
                   ? 'สร้างลิงก์ชำระเงิน VelaPayment สำเร็จ'
@@ -381,10 +502,9 @@ export function CheckoutDrawer({
                   ? 'ระบบกำลังนำท่านไปยังหน้าชำระเงิน Stripe Thailand / PromptPay QR หากหน้าต่างไม่เปลี่ยนอัตโนมัติ กรุณากดปุ่มด้านล่าง'
                   : 'Redirecting you to Stripe Thailand / PromptPay QR checkout. If your browser does not redirect automatically, click below.'}
               </p>
-              <a
-                href={redirectUrl}
-                target="_top"
-                rel="noopener noreferrer"
+              <button
+                type="button"
+                onClick={() => window.location.assign(redirectUrl)}
                 className="w-full inline-flex items-center justify-center gap-2 px-4 py-3 text-sm font-medium text-white bg-emerald-700 rounded-lg hover:bg-emerald-800 transition-colors"
               >
                 <span>
@@ -393,6 +513,17 @@ export function CheckoutDrawer({
                     : 'Proceed to VelaPayment Checkout'}
                 </span>
                 <ExternalLink className="w-4 h-4" />
+              </button>
+              <a
+                href={redirectUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-100 transition-colors"
+              >
+                <span>
+                  {lang === 'th' ? 'เปิดหน้าชำระเงินในแท็บใหม่' : 'Open Checkout in New Tab'}
+                </span>
+                <ExternalLink className="w-3.5 h-3.5" />
               </a>
               <button
                 type="button"
@@ -402,7 +533,7 @@ export function CheckoutDrawer({
                 {lang === 'th' ? 'กลับไปแก้ไขรายการ' : 'Back to Checkout'}
               </button>
             </div>
-          ) : cart.length === 0 ? (
+          ) : !hasItemsToCheckout ? (
             <div className="py-16 text-center space-y-4">
               {callbackNotice && (
                 <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800 text-left">
@@ -426,53 +557,129 @@ export function CheckoutDrawer({
                 </div>
               )}
 
-              {/* Itemized Bag */}
-              <div className="divide-y divide-slate-200 border border-slate-200 rounded-xl">
-                {cart.map((item) => (
-                  <div key={item.product.sku} className="p-4 flex items-center justify-between gap-4">
+              {/* Itemized Summary: Direct Marketplace/Auction OR CJ Cart */}
+              {directTarget ? (
+                <div className="border border-slate-200 rounded-xl divide-y divide-slate-200">
+                  <div className="p-4 flex items-center justify-between gap-4">
                     <div className="min-w-0">
+                      <p className="text-xs text-slate-500 mb-0.5">
+                        {directTarget.kind === 'auction'
+                          ? lang === 'th'
+                            ? 'ชนะการประมูล · ค่าธรรมเนียม 5%'
+                            : 'Auction Win · 5% Fee'
+                          : lang === 'th'
+                          ? 'สินค้าสมาชิก · ค่าธรรมเนียม 5%'
+                          : 'Member Listing · 5% Fee'}
+                      </p>
                       <p className="text-sm font-medium text-slate-900 truncate">
-                        {lang === 'th' ? item.product.titleTh : item.product.title}
+                        {directTarget.kind === 'marketplace'
+                          ? directTarget.listing.title
+                          : directTarget.auction.title}
                       </p>
-                      <p className="text-xs text-slate-500 font-mono tabular-nums mt-0.5">
-                        {item.product.sku} · {formatThb(item.product.retailPrice)}
+                      <p className="text-xs text-slate-500 mt-0.5">
+                        {lang === 'th' ? 'ผู้ขาย' : 'Seller'}:{' '}
+                        {directTarget.kind === 'marketplace'
+                          ? directTarget.listing.sellerName
+                          : directTarget.auction.sellerName}
                       </p>
                     </div>
-                    <div className="flex items-center gap-2 shrink-0">
-                      <button
-                        type="button"
-                        onClick={() => onUpdateQty(item.product.sku, -1)}
-                        className="p-1.5 rounded-md border border-slate-200 text-slate-600 hover:bg-slate-100"
-                      >
-                        <Minus className="w-3.5 h-3.5" />
-                      </button>
-                      <span className="text-xs font-mono w-6 text-center tabular-nums">
-                        {item.quantity}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => onUpdateQty(item.product.sku, 1)}
-                        className="p-1.5 rounded-md border border-slate-200 text-slate-600 hover:bg-slate-100"
-                      >
-                        <Plus className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => onRemoveItem(item.product.sku)}
-                        className="p-1.5 rounded-md text-slate-400 hover:text-rose-600"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
+
+                    {directTarget.kind === 'marketplace' ? (
+                      <div className="flex items-center gap-2 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => onUpdateDirectQty(-1)}
+                          disabled={directTarget.quantity <= 1}
+                          className="p-1.5 rounded-md border border-slate-200 text-slate-600 hover:bg-slate-100 disabled:opacity-40"
+                        >
+                          <Minus className="w-3.5 h-3.5" />
+                        </button>
+                        <span className="text-xs font-mono w-6 text-center tabular-nums">
+                          {directTarget.quantity}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => onUpdateDirectQty(1)}
+                          disabled={directTarget.quantity >= directTarget.listing.stock}
+                          className="p-1.5 rounded-md border border-slate-200 text-slate-600 hover:bg-slate-100 disabled:opacity-40"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    ) : (
+                      <span className="text-xs font-mono text-slate-500">1 item</span>
+                    )}
                   </div>
-                ))}
-                <div className="p-4 bg-slate-50 flex items-center justify-between rounded-b-xl">
-                  <span className="text-sm font-medium text-slate-700">Subtotal</span>
-                  <span className="text-lg font-semibold text-slate-900 tabular-nums">
-                    {formatThb(subtotal)}
-                  </span>
+
+                  {feePreview && (
+                    <div className="p-4 bg-slate-50 space-y-1.5 text-xs">
+                      <div className="flex items-center justify-between text-slate-600">
+                        <span>{lang === 'th' ? 'ค่าธรรมเนียมแพลตฟอร์ม (5%)' : 'Platform Fee (5%)'}</span>
+                        <span className="font-mono tabular-nums">{formatThb(feePreview.feeAmount)}</span>
+                      </div>
+                      <div className="flex items-center justify-between text-emerald-700">
+                        <span>{lang === 'th' ? 'ผู้ขายได้รับสุทธิ (95%)' : 'Seller Net Proceeds (95%)'}</span>
+                        <span className="font-mono tabular-nums">{formatThb(feePreview.sellerNetAmount)}</span>
+                      </div>
+                      <div className="flex items-center justify-between pt-2 border-t border-slate-200">
+                        <span className="text-sm font-medium text-slate-800">
+                          {lang === 'th' ? 'ยอดชำระรวม' : 'Total Due'}
+                        </span>
+                        <span className="text-lg font-semibold text-slate-900 tabular-nums">
+                          {formatThb(subtotal)}
+                        </span>
+                      </div>
+                    </div>
+                  )}
                 </div>
-              </div>
+              ) : (
+                <div className="divide-y divide-slate-200 border border-slate-200 rounded-xl">
+                  {cart.map((item) => (
+                    <div key={item.product.sku} className="p-4 flex items-center justify-between gap-4">
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium text-slate-900 truncate">
+                          {lang === 'th' ? item.product.titleTh : item.product.title}
+                        </p>
+                        <p className="text-xs text-slate-500 font-mono tabular-nums mt-0.5">
+                          {item.product.sku} · {formatThb(item.product.retailPrice)}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => onUpdateQty(item.product.sku, -1)}
+                          className="p-1.5 rounded-md border border-slate-200 text-slate-600 hover:bg-slate-100"
+                        >
+                          <Minus className="w-3.5 h-3.5" />
+                        </button>
+                        <span className="text-xs font-mono w-6 text-center tabular-nums">
+                          {item.quantity}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => onUpdateQty(item.product.sku, 1)}
+                          className="p-1.5 rounded-md border border-slate-200 text-slate-600 hover:bg-slate-100"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onRemoveItem(item.product.sku)}
+                          className="p-1.5 rounded-md text-slate-400 hover:text-rose-600"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                  <div className="p-4 bg-slate-50 flex items-center justify-between rounded-b-xl">
+                    <span className="text-sm font-medium text-slate-700">Subtotal</span>
+                    <span className="text-lg font-semibold text-slate-900 tabular-nums">
+                      {formatThb(subtotal)}
+                    </span>
+                  </div>
+                </div>
+              )}
 
               {!user ? (
                 <div className="bg-slate-50 border border-slate-200 rounded-xl p-6 space-y-3">
@@ -534,13 +741,15 @@ export function CheckoutDrawer({
                         placeholder={t.postalCode}
                         className="px-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-900 font-mono"
                       />
-                      <input
-                        type="text"
-                        value={sponsorCode}
-                        onChange={(e) => setSponsorCode(e.target.value)}
-                        placeholder={t.sponsorCode}
-                        className="col-span-2 sm:col-span-1 px-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-900 font-mono uppercase"
-                      />
+                      {!isDirectMode && (
+                        <input
+                          type="text"
+                          value={sponsorCode}
+                          onChange={(e) => setSponsorCode(e.target.value)}
+                          placeholder={t.sponsorCode}
+                          className="col-span-2 sm:col-span-1 px-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-900 font-mono uppercase"
+                        />
+                      )}
                     </div>
                   </div>
 
@@ -581,7 +790,7 @@ export function CheckoutDrawer({
                       >
                         <Wallet className="w-4 h-4 mb-1.5" />
                         <span className="text-xs font-semibold block">
-                          {lang === 'th' ? 'กระเป๋าเงินคอมมิชชั่น' : 'Commission Wallet'}
+                          {lang === 'th' ? 'กระเป๋าเงินสมาชิก' : 'Member Wallet'}
                         </span>
                         <span
                           className={`text-[11px] font-mono block mt-0.5 tabular-nums ${
@@ -608,7 +817,9 @@ export function CheckoutDrawer({
                     {busy
                       ? t.processing
                       : gatewayChoice === 'wallet'
-                      ? t.confirmPayBtn
+                      ? lang === 'th'
+                        ? `ชำระ ${formatThb(subtotal)} ด้วยกระเป๋าเงินสมาชิก`
+                        : `Pay ${formatThb(subtotal)} with Member Wallet`
                       : lang === 'th'
                       ? `ชำระเงิน ${formatThb(subtotal)} ผ่าน VelaPayment`
                       : `Pay ${formatThb(subtotal)} via VelaPayment`}

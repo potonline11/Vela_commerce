@@ -11,13 +11,18 @@ import {
   updateDoc,
   where,
   writeBatch,
+  Timestamp,
   type Unsubscribe,
 } from 'firebase/firestore';
 import { signInWithPopup, signOut, type User } from 'firebase/auth';
 import { auth, db, googleProvider, handleFirestoreError, OperationType } from '../firebase';
 import type {
+  AuctionBidRecord,
+  AuctionRecord,
   CartItem,
   CommissionRecord,
+  ItemCondition,
+  MemberListingRecord,
   MemberPrivateInfo,
   MemberProfile,
   MemberRank,
@@ -28,6 +33,17 @@ import type {
   PayoutRequestRecord,
   SecurityLogRecord,
 } from '../types';
+
+export const PLATFORM_FEE_RATE = 0.05;
+
+export function calculatePlatformFee(grossAmount: number): {
+  feeAmount: number;
+  sellerNetAmount: number;
+} {
+  const feeAmount = Number((grossAmount * PLATFORM_FEE_RATE).toFixed(2));
+  const sellerNetAmount = Number((grossAmount - feeAmount).toFixed(2));
+  return { feeAmount, sellerNetAmount };
+}
 
 export const MLM_TIERS = [
   { tier: 1, ratePercent: 12.0, label: 'Tier 1 · Direct Sponsor' },
@@ -174,9 +190,12 @@ export function subscribeMyPrivateInfo(
 }
 
 export function subscribeNetworkMembers(
+  isAdminUser: boolean,
   onData: (members: MemberProfile[]) => void
 ): Unsubscribe {
-  const q = query(collection(db, 'members'), where('status', '==', 'active'));
+  const q = isAdminUser
+    ? query(collection(db, 'members'))
+    : query(collection(db, 'members'), where('status', '==', 'active'));
   return onSnapshot(
     q,
     (snap) => {
@@ -191,23 +210,59 @@ export function subscribeMyOrders(
   isAdminUser: boolean,
   onData: (orders: OrderRecord[]) => void
 ): Unsubscribe {
-  const q = isAdminUser
-    ? query(collection(db, 'orders'), orderBy('createdAt', 'desc'))
-    : query(collection(db, 'orders'), where('buyerUid', '==', uid));
+  if (isAdminUser) {
+    const q = query(collection(db, 'orders'), orderBy('createdAt', 'desc'));
+    return onSnapshot(
+      q,
+      (snap) => {
+        const list = snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<OrderRecord, 'id'>) }));
+        onData(list);
+      },
+      (err) => handleFirestoreError(err, OperationType.LIST, 'orders')
+    );
+  }
 
-  return onSnapshot(
-    q,
+  const buyerMap = new Map<string, OrderRecord>();
+  const sellerMap = new Map<string, OrderRecord>();
+
+  const emit = () => {
+    const merged = new Map<string, OrderRecord>([...buyerMap, ...sellerMap]);
+    const list = Array.from(merged.values()).sort((a, b) => {
+      const ta = (a.createdAt as { seconds?: number })?.seconds || 0;
+      const tb = (b.createdAt as { seconds?: number })?.seconds || 0;
+      return tb - ta;
+    });
+    onData(list);
+  };
+
+  const unsubBuyer = onSnapshot(
+    query(collection(db, 'orders'), where('buyerUid', '==', uid)),
     (snap) => {
-      const list = snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<OrderRecord, 'id'>) }));
-      list.sort((a, b) => {
-        const ta = (a.createdAt as { seconds?: number })?.seconds || 0;
-        const tb = (b.createdAt as { seconds?: number })?.seconds || 0;
-        return tb - ta;
-      });
-      onData(list);
+      buyerMap.clear();
+      for (const d of snap.docs) {
+        buyerMap.set(d.id, { id: d.id, ...(d.data() as Omit<OrderRecord, 'id'>) });
+      }
+      emit();
     },
     (err) => handleFirestoreError(err, OperationType.LIST, 'orders')
   );
+
+  const unsubSeller = onSnapshot(
+    query(collection(db, 'orders'), where('sellerUid', '==', uid)),
+    (snap) => {
+      sellerMap.clear();
+      for (const d of snap.docs) {
+        sellerMap.set(d.id, { id: d.id, ...(d.data() as Omit<OrderRecord, 'id'>) });
+      }
+      emit();
+    },
+    (err) => handleFirestoreError(err, OperationType.LIST, 'orders')
+  );
+
+  return () => {
+    unsubBuyer();
+    unsubSeller();
+  };
 }
 
 export function subscribeMyCommissions(
@@ -570,6 +625,24 @@ export async function syncOrderTrackingWithCj(order: OrderRecord): Promise<void>
   }
 }
 
+export async function updateDirectSellerTracking(
+  orderId: string,
+  trackingNumber: string,
+  carrierName: string,
+  fulfillmentStatus: 'in_transit' | 'delivered'
+): Promise<void> {
+  try {
+    await updateDoc(doc(db, 'orders', orderId), {
+      trackingNumber: trackingNumber.trim().slice(0, 80) || 'DIRECT-PARCEL',
+      carrierName: carrierName.trim().slice(0, 64) || 'Flash Express',
+      fulfillmentStatus,
+      updatedAt: serverTimestamp(),
+    });
+  } catch (err) {
+    handleFirestoreError(err, OperationType.UPDATE, `orders/${orderId}`);
+  }
+}
+
 export async function submitPayoutWithdrawal(
   profile: MemberProfile,
   amount: number,
@@ -619,4 +692,596 @@ export async function submitPayoutWithdrawal(
   } catch (err) {
     handleFirestoreError(err, OperationType.WRITE, `payoutRequests/${payoutId}`);
   }
+}
+
+// --- Member Marketplace (Shopee-style · 5% Fee) & Live Auctions (eBay-style · 5% Fee) ---
+
+export async function checkIsAdminUser(user: User | null): Promise<boolean> {
+  if (!user || !user.emailVerified) return false;
+  if (user.email === 'pnmall4u@gmail.com') return true;
+  try {
+    const snap = await getDoc(doc(db, 'admins', user.uid));
+    return snap.exists();
+  } catch {
+    return false;
+  }
+}
+
+export async function adminUpdateMemberStatus(
+  memberUid: string,
+  nextStatus: 'active' | 'suspended'
+): Promise<void> {
+  try {
+    await updateDoc(doc(db, 'members', memberUid), {
+      status: nextStatus,
+      updatedAt: serverTimestamp(),
+    });
+  } catch (err) {
+    handleFirestoreError(err, OperationType.UPDATE, `members/${memberUid}`);
+  }
+}
+
+export async function adminProcessPayoutRequest(
+  adminUser: User,
+  payout: PayoutRequestRecord,
+  nextStatus: 'approved' | 'completed' | 'rejected'
+): Promise<void> {
+  const batch = writeBatch(db);
+  batch.update(doc(db, 'payoutRequests', payout.id), {
+    status: nextStatus,
+    updatedAt: serverTimestamp(),
+  });
+
+  // Refund member wallet if payout is rejected from pending/approved state
+  if (nextStatus === 'rejected' && payout.status !== 'rejected' && payout.status !== 'completed') {
+    const memberRef = doc(db, 'members', payout.memberUid);
+    const memberSnap = await getDoc(memberRef);
+    if (memberSnap.exists()) {
+      const m = memberSnap.data() as MemberProfile;
+      batch.update(memberRef, {
+        walletBalance: Number((m.walletBalance + payout.amount).toFixed(2)),
+        updatedAt: serverTimestamp(),
+      });
+    }
+  }
+
+  const logId = `log_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  batch.set(doc(db, 'securityLogs', logId), {
+    actorUid: adminUser.uid,
+    action: `ADMIN_PAYOUT_${nextStatus.toUpperCase()}`,
+    resourceType: 'payoutRequest',
+    resourceId: payout.id,
+    integrityHash: `${adminUser.uid.slice(0, 10)}_${payout.id.slice(0, 10)}_${Date.now()}`,
+    createdAt: serverTimestamp(),
+  });
+
+  try {
+    await batch.commit();
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, `payoutRequests/${payout.id}`);
+  }
+}
+
+export async function adminCancelAuction(auctionId: string): Promise<void> {
+  try {
+    await updateDoc(doc(db, 'auctions', auctionId), {
+      status: 'cancelled',
+      updatedAt: serverTimestamp(),
+    });
+  } catch (err) {
+    handleFirestoreError(err, OperationType.UPDATE, `auctions/${auctionId}`);
+  }
+}
+
+export function subscribeMemberListings(
+  uid: string | null,
+  isAdminUser: boolean,
+  onData: (listings: MemberListingRecord[]) => void
+): Unsubscribe {
+  if (isAdminUser) {
+    return onSnapshot(
+      collection(db, 'memberListings'),
+      (snap) => {
+        const list = snap.docs
+          .map((d) => ({ id: d.id, ...(d.data() as Omit<MemberListingRecord, 'id'>) }))
+          .sort((a, b) => {
+            const ta = (a.createdAt as { seconds?: number })?.seconds || 0;
+            const tb = (b.createdAt as { seconds?: number })?.seconds || 0;
+            return tb - ta;
+          });
+        onData(list);
+      },
+      (err) => handleFirestoreError(err, OperationType.LIST, 'memberListings')
+    );
+  }
+
+  const activeMap = new Map<string, MemberListingRecord>();
+  const ownMap = new Map<string, MemberListingRecord>();
+
+  const emit = () => {
+    const merged = new Map<string, MemberListingRecord>([...activeMap, ...ownMap]);
+    const list = Array.from(merged.values()).sort((a, b) => {
+      const ta = (a.createdAt as { seconds?: number })?.seconds || 0;
+      const tb = (b.createdAt as { seconds?: number })?.seconds || 0;
+      return tb - ta;
+    });
+    onData(list);
+  };
+
+  const unsubActive = onSnapshot(
+    query(collection(db, 'memberListings'), where('status', '==', 'active')),
+    (snap) => {
+      activeMap.clear();
+      for (const d of snap.docs) {
+        activeMap.set(d.id, { id: d.id, ...(d.data() as Omit<MemberListingRecord, 'id'>) });
+      }
+      emit();
+    },
+    (err) => handleFirestoreError(err, OperationType.LIST, 'memberListings')
+  );
+
+  let unsubOwn: Unsubscribe | null = null;
+  if (uid) {
+    unsubOwn = onSnapshot(
+      query(collection(db, 'memberListings'), where('sellerUid', '==', uid)),
+      (snap) => {
+        ownMap.clear();
+        for (const d of snap.docs) {
+          ownMap.set(d.id, { id: d.id, ...(d.data() as Omit<MemberListingRecord, 'id'>) });
+        }
+        emit();
+      },
+      (err) => handleFirestoreError(err, OperationType.LIST, 'memberListings')
+    );
+  }
+
+  return () => {
+    unsubActive();
+    if (unsubOwn) unsubOwn();
+  };
+}
+
+export function subscribeAuctions(
+  uid: string | null,
+  isAdminUser: boolean,
+  onData: (auctions: AuctionRecord[]) => void
+): Unsubscribe {
+  if (isAdminUser) {
+    return onSnapshot(
+      collection(db, 'auctions'),
+      (snap) => {
+        const list = snap.docs
+          .map((d) => ({ id: d.id, ...(d.data() as Omit<AuctionRecord, 'id'>) }))
+          .sort((a, b) => {
+            const ta = (a.createdAt as { seconds?: number })?.seconds || 0;
+            const tb = (b.createdAt as { seconds?: number })?.seconds || 0;
+            return tb - ta;
+          });
+        onData(list);
+      },
+      (err) => handleFirestoreError(err, OperationType.LIST, 'auctions')
+    );
+  }
+
+  const publicMap = new Map<string, AuctionRecord>();
+  const ownMap = new Map<string, AuctionRecord>();
+
+  const emit = () => {
+    const merged = new Map<string, AuctionRecord>([...publicMap, ...ownMap]);
+    const list = Array.from(merged.values()).sort((a, b) => {
+      const ta = (a.createdAt as { seconds?: number })?.seconds || 0;
+      const tb = (b.createdAt as { seconds?: number })?.seconds || 0;
+      return tb - ta;
+    });
+    onData(list);
+  };
+
+  const unsubPublic = onSnapshot(
+    query(collection(db, 'auctions'), where('status', 'in', ['live', 'ended_pending_payment', 'settled'])),
+    (snap) => {
+      publicMap.clear();
+      for (const d of snap.docs) {
+        publicMap.set(d.id, { id: d.id, ...(d.data() as Omit<AuctionRecord, 'id'>) });
+      }
+      emit();
+    },
+    (err) => handleFirestoreError(err, OperationType.LIST, 'auctions')
+  );
+
+  let unsubOwn: Unsubscribe | null = null;
+  if (uid) {
+    unsubOwn = onSnapshot(
+      query(collection(db, 'auctions'), where('sellerUid', '==', uid)),
+      (snap) => {
+        ownMap.clear();
+        for (const d of snap.docs) {
+          ownMap.set(d.id, { id: d.id, ...(d.data() as Omit<AuctionRecord, 'id'>) });
+        }
+        emit();
+      },
+      (err) => handleFirestoreError(err, OperationType.LIST, 'auctions')
+    );
+  }
+
+  return () => {
+    unsubPublic();
+    if (unsubOwn) unsubOwn();
+  };
+}
+
+export function subscribeAuctionBids(
+  auctionId: string,
+  onData: (bids: AuctionBidRecord[]) => void
+): Unsubscribe {
+  const q = query(
+    collection(db, 'auctions', auctionId, 'bids'),
+    where('auctionId', '==', auctionId)
+  );
+  return onSnapshot(
+    q,
+    (snap) => {
+      const list = snap.docs
+        .map((d) => ({ id: d.id, ...(d.data() as Omit<AuctionBidRecord, 'id'>) }))
+        .sort((a, b) => b.amount - a.amount);
+      onData(list);
+    },
+    (err) => handleFirestoreError(err, OperationType.LIST, `auctions/${auctionId}/bids`)
+  );
+}
+
+export async function createMemberListing(
+  user: User,
+  profile: MemberProfile,
+  input: {
+    title: string;
+    description: string;
+    category: string;
+    condition: ItemCondition;
+    imageUrl: string;
+    price: number;
+    stock: number;
+  }
+): Promise<string> {
+  const listingId = `lst_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const cleanPrice = Number(Number(input.price).toFixed(2));
+  const cleanStock = Math.max(1, Math.min(10000, Math.floor(Number(input.stock))));
+
+  if (!Number.isFinite(cleanPrice) || cleanPrice < 10) {
+    throw new Error('Price must be at least 10 THB');
+  }
+
+  try {
+    await setDoc(doc(db, 'memberListings', listingId), {
+      sellerUid: user.uid,
+      sellerName: (profile.displayName || user.displayName || 'Member').slice(0, 80),
+      title: input.title.trim().slice(0, 140),
+      description: input.description.trim().slice(0, 800),
+      category: input.category.trim().slice(0, 60) || 'General',
+      condition: input.condition,
+      imageUrl: input.imageUrl.trim().slice(0, 500),
+      price: cleanPrice,
+      stock: cleanStock,
+      platformFeeRate: PLATFORM_FEE_RATE,
+      status: 'active',
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+    return listingId;
+  } catch (err) {
+    handleFirestoreError(err, OperationType.CREATE, `memberListings/${listingId}`);
+  }
+}
+
+export async function archiveMemberListing(listingId: string): Promise<void> {
+  try {
+    await updateDoc(doc(db, 'memberListings', listingId), {
+      status: 'archived',
+      updatedAt: serverTimestamp(),
+    });
+  } catch (err) {
+    handleFirestoreError(err, OperationType.UPDATE, `memberListings/${listingId}`);
+  }
+}
+
+export async function createAuctionItem(
+  user: User,
+  profile: MemberProfile,
+  input: {
+    title: string;
+    description: string;
+    category: string;
+    condition: ItemCondition;
+    imageUrl: string;
+    startingPrice: number;
+    minBidIncrement: number;
+    durationMinutes: number;
+  }
+): Promise<string> {
+  const auctionId = `auc_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const startingPrice = Number(Number(input.startingPrice).toFixed(2));
+  const minBidIncrement = Number(Number(input.minBidIncrement).toFixed(2));
+  const durationMs = Math.max(5, Math.min(10080, Math.floor(input.durationMinutes))) * 60_000;
+
+  if (!Number.isFinite(startingPrice) || startingPrice < 10) {
+    throw new Error('Starting price must be at least 10 THB');
+  }
+  if (!Number.isFinite(minBidIncrement) || minBidIncrement < 10) {
+    throw new Error('Minimum bid increment must be at least 10 THB');
+  }
+
+  try {
+    await setDoc(doc(db, 'auctions', auctionId), {
+      sellerUid: user.uid,
+      sellerName: (profile.displayName || user.displayName || 'Member').slice(0, 80),
+      title: input.title.trim().slice(0, 140),
+      description: input.description.trim().slice(0, 800),
+      category: input.category.trim().slice(0, 60) || 'Collectibles',
+      condition: input.condition,
+      imageUrl: input.imageUrl.trim().slice(0, 500),
+      startingPrice,
+      minBidIncrement,
+      currentBid: startingPrice,
+      bidCount: 0,
+      platformFeeRate: PLATFORM_FEE_RATE,
+      endsAt: Timestamp.fromMillis(Date.now() + durationMs),
+      status: 'live',
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+    return auctionId;
+  } catch (err) {
+    handleFirestoreError(err, OperationType.CREATE, `auctions/${auctionId}`);
+  }
+}
+
+export async function placeAuctionBid(
+  user: User,
+  profile: MemberProfile,
+  auction: AuctionRecord,
+  bidAmountInput: number
+): Promise<void> {
+  if (auction.sellerUid === user.uid) {
+    throw new Error('Seller cannot bid on their own auction');
+  }
+  if (auction.status !== 'live') {
+    throw new Error('Auction is no longer live');
+  }
+  const endsMs = (auction.endsAt as { toMillis?: () => number })?.toMillis?.() || 0;
+  if (endsMs && Date.now() >= endsMs) {
+    throw new Error('Auction timer has ended');
+  }
+
+  const minRequired =
+    auction.bidCount === 0
+      ? auction.startingPrice
+      : Number((auction.currentBid + auction.minBidIncrement).toFixed(2));
+  const bidAmount = Number(Number(bidAmountInput).toFixed(2));
+
+  if (!Number.isFinite(bidAmount) || bidAmount < minRequired) {
+    throw new Error(`Bid must be at least ${minRequired} THB`);
+  }
+
+  const bidId = `bid_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const bidderName = (profile.displayName || user.displayName || 'Bidder').slice(0, 80);
+
+  const batch = writeBatch(db);
+  batch.set(doc(db, 'auctions', auction.id, 'bids', bidId), {
+    auctionId: auction.id,
+    bidderUid: user.uid,
+    bidderName,
+    amount: bidAmount,
+    createdAt: serverTimestamp(),
+  });
+
+  batch.update(doc(db, 'auctions', auction.id), {
+    currentBid: bidAmount,
+    bidCount: auction.bidCount + 1,
+    highestBidderUid: user.uid,
+    highestBidderName: bidderName,
+    lastBidId: bidId,
+    updatedAt: serverTimestamp(),
+  });
+
+  try {
+    await batch.commit();
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, `auctions/${auction.id}/bids/${bidId}`);
+  }
+}
+
+export async function closeAuctionRecord(auction: AuctionRecord): Promise<void> {
+  if (auction.status !== 'live') return;
+  try {
+    await updateDoc(doc(db, 'auctions', auction.id), {
+      status: auction.bidCount > 0 ? 'ended_pending_payment' : 'cancelled',
+      updatedAt: serverTimestamp(),
+    });
+  } catch (err) {
+    handleFirestoreError(err, OperationType.UPDATE, `auctions/${auction.id}`);
+  }
+}
+
+export interface DirectSettlementInput {
+  mode: 'marketplace' | 'auction';
+  user: User;
+  buyerProfile: MemberProfile;
+  sellerUid: string;
+  listing?: MemberListingRecord;
+  auction?: AuctionRecord;
+  quantity: number;
+  unitPrice: number;
+  itemTitle: string;
+  itemSku: string;
+  paymentMethod: PaymentMethod;
+  intentCode: string;
+  hmacSignature: string;
+  receiptHash: string;
+  maskedSource: string;
+  idempotencyKey: string;
+  orderId?: string;
+  orderNumber?: string;
+  shipping: {
+    recipientName: string;
+    phone: string;
+    addressLine: string;
+    city: string;
+    postalCode: string;
+  };
+}
+
+export async function commitMarketplaceOrAuctionCheckout(
+  input: DirectSettlementInput
+): Promise<{
+  orderNumber: string;
+  cjOrderId: string;
+  trackingNumber: string;
+  platformFeeAmount: number;
+  sellerNetAmount: number;
+  commissionsDistributed: Array<{ tier: number; beneficiaryName: string; amount: number }>;
+}> {
+  if (input.sellerUid === input.user.uid) {
+    throw new Error('Seller cannot purchase or settle their own item');
+  }
+
+  const quantity = input.mode === 'auction' ? 1 : Math.max(1, Math.floor(input.quantity));
+  const totalAmount = Number((input.unitPrice * quantity).toFixed(2));
+  const { feeAmount, sellerNetAmount } = calculatePlatformFee(totalAmount);
+
+  const sellerRef = doc(db, 'members', input.sellerUid);
+  let sellerSnap;
+  try {
+    sellerSnap = await getDoc(sellerRef);
+  } catch (err) {
+    handleFirestoreError(err, OperationType.GET, `members/${input.sellerUid}`);
+  }
+  if (!sellerSnap.exists()) {
+    throw new Error('Seller member profile not found');
+  }
+  const sellerProfile = sellerSnap.data() as MemberProfile;
+
+  const orderId =
+    input.orderId && /^[a-zA-Z0-9_\-]+$/.test(input.orderId)
+      ? input.orderId
+      : `ord_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const orderNumber =
+    input.orderNumber ||
+    `${input.mode === 'auction' ? 'AUC' : 'MKT'}-${Date.now().toString().slice(-6)}-${Math.floor(100 + Math.random() * 899)}`;
+  const intentDocId = `pi_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const safeIntentCode = input.intentCode.replace(/[^a-zA-Z0-9_\-]/g, '_').slice(0, 64);
+
+  const batch = writeBatch(db);
+
+  batch.set(doc(db, 'paymentIntents', intentDocId), {
+    intentCode: safeIntentCode.length >= 6 ? safeIntentCode : `VP_${safeIntentCode}`,
+    ownerUid: input.user.uid,
+    orderId,
+    amount: totalAmount,
+    currency: 'THB',
+    method: input.paymentMethod,
+    maskedSource: input.maskedSource,
+    hmacSignature: input.hmacSignature,
+    idempotencyKey: input.idempotencyKey,
+    status: 'settled',
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+
+  batch.set(doc(db, 'orders', orderId), {
+    orderNumber,
+    orderSource: input.mode === 'auction' ? 'auction_win' : 'member_marketplace',
+    ...(input.mode === 'marketplace' && input.listing ? { listingId: input.listing.id } : {}),
+    ...(input.mode === 'auction' && input.auction ? { auctionId: input.auction.id } : {}),
+    buyerUid: input.user.uid,
+    sellerUid: input.sellerUid,
+    itemSku: input.itemSku.slice(0, 64),
+    itemTitle: input.itemTitle.slice(0, 140),
+    quantity,
+    unitPrice: input.unitPrice,
+    totalAmount,
+    wholesaleCost: 0,
+    platformFeeAmount: feeAmount,
+    sellerNetAmount,
+    paymentIntentId: input.intentCode,
+    paymentMethod: input.paymentMethod,
+    paymentSignature: input.receiptHash,
+    paymentStatus: 'paid',
+    fulfillmentStatus: 'processing',
+    carrierName: 'Seller Direct Shipping',
+    shippingCity: input.shipping.city.slice(0, 80),
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+
+  batch.set(doc(db, 'orders', orderId, 'shipping', 'details'), {
+    orderId,
+    buyerUid: input.user.uid,
+    recipientName: input.shipping.recipientName.slice(0, 100),
+    phone: input.shipping.phone.slice(0, 32),
+    addressLine: input.shipping.addressLine.slice(0, 240),
+    postalCode: input.shipping.postalCode.slice(0, 16),
+    countryCode: 'TH',
+    createdAt: serverTimestamp(),
+  });
+
+  // Update buyer PV & debit wallet if wallet method used
+  const nextBuyerPv = Number((input.buyerProfile.personalVolume + totalAmount).toFixed(2));
+  const nextBuyerWallet =
+    input.paymentMethod === 'wallet'
+      ? Math.max(0, Number((input.buyerProfile.walletBalance - totalAmount).toFixed(2)))
+      : input.buyerProfile.walletBalance;
+
+  batch.update(doc(db, 'members', input.user.uid), {
+    personalVolume: nextBuyerPv,
+    walletBalance: nextBuyerWallet,
+    rank: calculateRank(nextBuyerPv, input.buyerProfile.teamVolume),
+    updatedAt: serverTimestamp(),
+  });
+
+  // Credit seller wallet by 95% net proceeds atomically verified via lastOrderId
+  batch.update(sellerRef, {
+    walletBalance: Number((sellerProfile.walletBalance + sellerNetAmount).toFixed(2)),
+    lastOrderId: orderId,
+    updatedAt: serverTimestamp(),
+  });
+
+  if (input.mode === 'marketplace' && input.listing) {
+    const nextStock = Math.max(0, input.listing.stock - quantity);
+    batch.update(doc(db, 'memberListings', input.listing.id), {
+      stock: nextStock,
+      status: nextStock === 0 ? 'sold_out' : 'active',
+      lastOrderId: orderId,
+      updatedAt: serverTimestamp(),
+    });
+  } else if (input.mode === 'auction' && input.auction) {
+    batch.update(doc(db, 'auctions', input.auction.id), {
+      status: 'settled',
+      winningOrderId: orderId,
+      updatedAt: serverTimestamp(),
+    });
+  }
+
+  const logId = `log_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  batch.set(doc(db, 'securityLogs', logId), {
+    actorUid: input.user.uid,
+    action: input.mode === 'auction' ? 'AUCTION_5PCT_SETTLED' : 'MARKETPLACE_5PCT_SETTLED',
+    resourceType: 'order',
+    resourceId: orderId,
+    integrityHash: input.receiptHash,
+    createdAt: serverTimestamp(),
+  });
+
+  try {
+    await batch.commit();
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, `orders/${orderId}`);
+  }
+
+  return {
+    orderNumber,
+    cjOrderId: input.mode === 'auction' ? 'AUCTION-DIRECT' : 'SELLER-DIRECT',
+    trackingNumber: 'AWAITING-SELLER-DISPATCH',
+    platformFeeAmount: feeAmount,
+    sellerNetAmount,
+    commissionsDistributed: [],
+  };
 }
