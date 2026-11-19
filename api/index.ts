@@ -2,6 +2,7 @@ import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
 import crypto from 'node:crypto';
 import nodemailer from 'nodemailer';
+import { GoogleGenAI } from '@google/genai';
 
 export interface CjProductRecord {
   sku: string;
@@ -1324,6 +1325,140 @@ export function createApiApp() {
       text: 'ระบบส่งอีเมลยืนยันคำสั่งซื้อและข้อมูลสมาชิกของ Vela Commerce พร้อมใช้งานแล้ว',
     });
     res.status(delivery.sent ? 200 : 200).json(delivery);
+  });
+
+  // --- 24/7 Customer Support Chatbot (Server-Side Gemini API) ---
+
+  function getGeminiClient(): GoogleGenAI | null {
+    const rawKey = (process.env.GEMINI_API_KEY || '')
+      .trim()
+      .replace(/^['"]|['"]$/g, '')
+      .trim();
+    if (!rawKey || rawKey === 'MY_GEMINI_API_KEY') return null;
+    return new GoogleGenAI({
+      apiKey: rawKey,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        },
+      },
+    });
+  }
+
+  app.post('/api/chat', async (req: Request, res: Response) => {
+    const message = sanitizeShortText(req.body?.message, 1000);
+    if (!message) {
+      res.status(400).json({ error: 'Message is required.' });
+      return;
+    }
+
+    const ai = getGeminiClient();
+    if (!ai) {
+      res.status(503).json({
+        error:
+          'GEMINI_API_KEY is not configured on the server. Add GEMINI_API_KEY in Settings > Secrets or Vercel Environment Variables.',
+      });
+      return;
+    }
+
+    const lang = req.body?.lang === 'en' ? 'en' : 'th';
+    const isSignedIn = Boolean(req.body?.isSignedIn);
+    const memberName = sanitizeShortText(req.body?.memberDisplayName, 80);
+
+    const rawHistory = Array.isArray(req.body?.history) ? req.body.history : [];
+    const historyContents = rawHistory
+      .slice(-10)
+      .filter(
+        (turn: unknown): turn is { role: 'user' | 'model'; text: string } =>
+          Boolean(turn) &&
+          typeof turn === 'object' &&
+          ((turn as { role?: string }).role === 'user' ||
+            (turn as { role?: string }).role === 'model') &&
+          typeof (turn as { text?: unknown }).text === 'string' &&
+          Boolean((turn as { text: string }).text.trim())
+      )
+      .map((turn: { role: 'user' | 'model'; text: string }) => ({
+        role: turn.role,
+        parts: [{ text: sanitizeShortText(turn.text, 1200) }],
+      }));
+
+    const rawCatalog = Array.isArray(req.body?.catalogPreview) ? req.body.catalogPreview : [];
+    const safeCatalogLines = rawCatalog
+      .slice(0, 12)
+      .map((item: unknown) => {
+        if (!item || typeof item !== 'object') return '';
+        const p = item as {
+          sku?: unknown;
+          title?: unknown;
+          category?: unknown;
+          price?: unknown;
+          stock?: unknown;
+        };
+        const title = sanitizeShortText(p.title, 80);
+        const sku = sanitizeShortText(p.sku, 32);
+        const cat = sanitizeShortText(p.category, 40);
+        const price = Number(p.price);
+        const stock = Number(p.stock);
+        if (!title || !Number.isFinite(price)) return '';
+        return `- ${title} (SKU: ${sku || 'N/A'}, หมวด: ${cat || 'General'}, ราคา: ฿${Math.round(
+          price
+        ).toLocaleString('th-TH')}, คงเหลือ: ${Number.isFinite(stock) ? stock : 'พร้อมส่ง'})`;
+      })
+      .filter(Boolean);
+
+    const systemInstruction = [
+      'คุณคือผู้ช่วยบริการลูกค้าตลอด 24 ชั่วโมงของร้าน Vela Commerce ("Vela Support Assistant")',
+      'ตอบคำถามอย่างสุภาพ ชัดเจน กระชับ และตรงประเด็น หากลูกค้าถามเป็นภาษาไทยให้ตอบเป็นภาษาไทย หากถามเป็นภาษาอังกฤษให้ตอบเป็นภาษาอังกฤษ',
+      `ภาษาหลักของหน้าเว็บตอนนี้: ${lang === 'th' ? 'ไทย' : 'English'}`,
+      isSignedIn && memberName
+        ? `สถานะลูกค้า: เข้าสู่ระบบสมาชิกแล้ว (ชื่อ: ${memberName})`
+        : 'สถานะลูกค้า: ผู้เยี่ยมชม / ยังไม่ได้เข้าสู่ระบบ',
+      '',
+      'ข้อมูลสำคัญของระบบ Vela Commerce:',
+      '1. การสั่งซื้อและสินค้า: เลือกสินค้าที่หน้าร้าน ("หน้าร้านค้า") กดเพิ่มลงตะกร้า กรอกที่อยู่จัดส่ง และกดชำระเงินได้ทันที',
+      '2. ช่องทางชำระเงิน: รองรับ Thai PromptPay QR, บัตรเครดิต/เดบิต ผ่าน VelaPayment Gateway และกระเป๋าเงินคอมมิชชั่นสมาชิก (Commission Wallet)',
+      '3. บัญชีสมาชิกอัตโนมัติ & อีเมลยืนยัน: หลังชำระเงินสำเร็จ ระบบจะส่งอีเมลยืนยันคำสั่งซื้อ พร้อม Username (อีเมล), รหัสผ่านเริ่มต้น (สำหรับลูกค้าใหม่), ลิงก์แนะนำส่วนตัว และลิงก์รีเซ็ตรหัสผ่านให้โดยอัตโนมัติ',
+      '4. การติดตามพัสดุ: เข้าเมนู "คำสั่งซื้อ & จัดส่ง" เพื่อดูเลขพัสดุและสถานะการจัดส่งล่าสุด',
+      '5. การรีเซ็ต/เปลี่ยนรหัสผ่าน: กดปุ่ม "เข้าสู่ระบบ / สมัครสมาชิก" แล้วเลือก "ลืมรหัสผ่าน / รีเซ็ต" หรือเปลี่ยนรหัสผ่านได้ในหน้า "แดชบอร์ดยอดขาย" เมื่อเข้าสู่ระบบแล้ว',
+      '6. ระบบสมาชิก & คอมมิชชั่น MLM 4 ชั้น: รวม 22.5% (ชั้น 1 = 12%, ชั้น 2 = 6%, ชั้น 3 = 3%, ชั้น 4 = 1.5%) ระดับสมาชิกเลื่อนตามยอด PV+TV (Bronze -> Silver 5,000+ -> Gold 20,000+ -> Platinum 60,000+ -> Diamond 150,000+) แจ้งถอนขั้นต่ำ ฿100 ผ่าน PromptPay หรือบัญชีธนาคารได้ในหน้าแดชบอร์ด',
+      '7. ตลาดสมาชิก & ประมูล ("ตลาด & ประมูล"): สมาชิกที่ยืนยันแล้วสามารถลงขายสินค้าหรือเปิดประมูลได้ (ค่าธรรมเนียมแพลตฟอร์ม 5%)',
+      '',
+      'กฎเหล็กด้านความปลอดภัยและความลับทางธุรกิจ:',
+      '- ห้ามเปิดเผยชื่อซัพพลายเออร์ต้นทาง (ห้ามพูดถึง CJ Dropshipping), ห้ามบอกราคาทุน (wholesale cost), ราคา USD, อัตราแลกเปลี่ยน หรือ % การบวกกำไร ให้ลูกค้าทราบโดยเด็ดขาด ให้แจ้งเฉพาะราคาขายหน้าร้านเป็นเงินบาท (฿) เท่านั้น',
+      '- หากไม่พบข้อมูลคำสั่งซื้อเฉพาะราย ให้แนะนำลูกค้าตรวจสอบในเมนู "คำสั่งซื้อ & จัดส่ง" หรือแจ้งเลขออเดอร์พร้อมอีเมลเพื่อติดต่อแอดมินร้าน',
+      safeCatalogLines.length > 0
+        ? `\nตัวอย่างสินค้าที่วางขายอยู่ในหน้าร้านตอนนี้:\n${safeCatalogLines.join('\n')}`
+        : '',
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    try {
+      const response = await ai.models.generateContent({
+        model: 'gemini-4-hydrogen',
+        contents: [...historyContents, { role: 'user', parts: [{ text: message }] }],
+        config: {
+          systemInstruction,
+        },
+      });
+
+      const reply = (response.text || '').trim();
+      if (!reply) {
+        res.status(502).json({ error: 'Empty response received from Gemini assistant.' });
+        return;
+      }
+
+      res.json({ reply });
+    } catch (err) {
+      const errMessage = err instanceof Error ? err.message : 'Unable to generate chat response';
+      const status =
+        errMessage.includes('API_KEY_INVALID') || errMessage.includes('PERMISSION_DENIED')
+          ? 403
+          : errMessage.includes('RESOURCE_EXHAUSTED') || errMessage.includes('429')
+          ? 429
+          : 502;
+      res.status(status).json({ error: errMessage });
+    }
   });
 
   return app;

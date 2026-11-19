@@ -34,6 +34,7 @@ import {
   type PendingVelaCheckout,
 } from './components/CheckoutDrawer';
 import { LogoModal } from './components/LogoModal';
+import { SupportChatWidget } from './components/SupportChatWidget';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import type {
   AuctionRecord,
@@ -801,6 +802,16 @@ function AppShell() {
         externalReceipt={externalReceipt}
         onClearExternalReceipt={() => setExternalReceipt(null)}
       />
+
+      {!(isAdmin && workspaceMode === 'admin') && (
+        <SupportChatWidget
+          lang={lang}
+          products={products}
+          isSignedIn={Boolean(user)}
+          memberDisplayName={profile?.displayName}
+          hidden={drawerOpen || authModalOpen || logoModalOpen}
+        />
+      )}
     </div>
   );
 }
